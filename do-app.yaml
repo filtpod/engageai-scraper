@@ -29,7 +29,7 @@ jobs:
       # Update to your actual owner/repo if different.
       repo: TeamEAI/engageai-functions
       branch: main
-      deploy_on_push: true
+      deploy_on_push: false
     source_dir: scraper
     dockerfile_path: scraper/Dockerfile
 
@@ -39,71 +39,57 @@ jobs:
     envs:
       # Database connection (DigitalOcean Managed MySQL)
       - key: DB_HOST
-        value: ""
         scope: RUN_TIME
         type: GENERAL
       - key: DB_PORT
-        value: ""
         scope: RUN_TIME
         type: GENERAL
       - key: DB_NAME
-        value: ""
         scope: RUN_TIME
         type: GENERAL
       - key: DB_USER
-        value: ""
         scope: RUN_TIME
         type: GENERAL
       - key: DB_PASSWORD
-        value: ""
         scope: RUN_TIME
         type: SECRET
 
       # Azure OpenAI
       - key: AZUREAI_API_KEY
-        value: ""
         scope: RUN_TIME
         type: SECRET
       - key: AZUREAI_ENDPOINT
-        value: ""
         scope: RUN_TIME
         type: GENERAL
       - key: AZUREAI_DEPLOYMENT
-        value: ""
         scope: RUN_TIME
         type: GENERAL
 
       # DeepSeek
       - key: DEEPSEEK_API_KEY
-        value: ""
         scope: RUN_TIME
         type: SECRET
 
       # HubSpot OAuth app (used when sending timeline events)
       - key: HUBSPOT_CLIENT_ID
-        value: ""
         scope: RUN_TIME
         type: SECRET
       - key: HUBSPOT_CLIENT_SECRET
-        value: ""
         scope: RUN_TIME
         type: SECRET
 
       # Postmark server token for admin notification email
       - key: POSTMARK_SERVER_TOKEN
-        value: ""
         scope: RUN_TIME
         type: SECRET
 
       # Admin email for notifications (default is hello@engage-ai.co if unset)
       - key: ADMIN_EMAIL
-        value: ""
         scope: RUN_TIME
         type: GENERAL
 
       # Scrape-it API key (if using scrap_it fallback)
       - key: SCRAPE_IT_API_KEY
-        value: ""
         scope: RUN_TIME
         type: SECRET
 

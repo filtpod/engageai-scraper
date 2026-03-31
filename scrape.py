@@ -17,17 +17,23 @@ from hubspot import HubSpot
 
 def get_db_connection():
     """Create a new MySQL connection using environment variables."""
-    return mysql.connector.connect(
+    print("Connecting to database...", flush=True)
+    conn = mysql.connector.connect(
         host=os.environ["DB_HOST"],
         user=os.environ["DB_USER"],
         password=os.environ["DB_PASSWORD"],
         database=os.environ["DB_NAME"],
         port=int(os.environ.get("DB_PORT", "3306")),
         ssl_disabled=False,
+        connection_timeout=30,
     )
+    print("Database connected.", flush=True)
+    return conn
 
 
 def main():
+    print("Scraper job starting...", flush=True)
+
     # HubSpot OAuth app credentials from env
     hubspot_client_id = os.environ.get("HUBSPOT_CLIENT_ID", "")
     hubspot_client_secret = os.environ.get("HUBSPOT_CLIENT_SECRET", "")
