@@ -1,0 +1,109 @@
+# DigitalOcean App Platform spec for the LinkedIn scraper job.
+# This defines a separate App Platform app with a single scheduled Job
+# component that runs the scraper container on a cron schedule.
+#
+# Deploy:
+#   doctl apps create --spec scraper/do-app.yaml
+#
+# After creating the app:
+#   1. Set all environment variable values in the App control panel
+#      (Apps > this app > Settings > prospect-scraper > Environment variables).
+#   2. Add this App as a trusted source on your Managed Database
+#      (Database > Settings > Trusted sources > Quick select > Apps).
+#
+# Notes:
+# - The schedule below runs every 12 hours: "0 */12 * * *".
+
+name: engageai-scraper-job
+region: syd
+
+jobs:
+  - name: prospect-scraper
+    kind: SCHEDULED
+    schedule:
+      cron: "0 */12 * * *"
+      time_zone: Australia/Sydney
+
+    # Build from this repo using the Dockerfile in the scraper/ directory.
+    github:
+      # Update to your actual owner/repo if different.
+      repo: TeamEAI/engageai-functions
+      branch: main
+      deploy_on_push: false
+    source_dir: scraper
+    dockerfile_path: Dockerfile
+
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+
+    envs:
+      # Database connection (DigitalOcean Managed MySQL)
+      - key: DB_HOST
+        value: ""
+        scope: RUN_TIME
+        type: GENERAL
+      - key: DB_PORT
+        value: ""
+        scope: RUN_TIME
+        type: GENERAL
+      - key: DB_NAME
+        value: ""
+        scope: RUN_TIME
+        type: GENERAL
+      - key: DB_USER
+        value: ""
+        scope: RUN_TIME
+        type: GENERAL
+      - key: DB_PASSWORD
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+
+      # Azure OpenAI
+      - key: AZUREAI_API_KEY
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+      - key: AZUREAI_ENDPOINT
+        value: ""
+        scope: RUN_TIME
+        type: GENERAL
+      - key: AZUREAI_DEPLOYMENT
+        value: ""
+        scope: RUN_TIME
+        type: GENERAL
+
+      # DeepSeek
+      - key: DEEPSEEK_API_KEY
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+
+      # HubSpot OAuth app (used when sending timeline events)
+      - key: HUBSPOT_CLIENT_ID
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+      - key: HUBSPOT_CLIENT_SECRET
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+
+      # Postmark server token for admin notification email
+      - key: POSTMARK_SERVER_TOKEN
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+
+      # Admin email for notifications (default is hello@engage-ai.co if unset)
+      - key: ADMIN_EMAIL
+        value: ""
+        scope: RUN_TIME
+        type: GENERAL
+
+      # Scrape-it API key (if using scrap_it fallback)
+      - key: SCRAPE_IT_API_KEY
+        value: ""
+        scope: RUN_TIME
+        type: SECRET
+
