@@ -27,9 +27,9 @@ jobs:
     # Build from this repo using the Dockerfile in the scraper/ directory.
     github:
       # Update to your actual owner/repo if different.
-      repo: TeamEAI/engageai-serverless
+      repo: TeamEAI/engageai-functions
       branch: main
-      deploy_on_push: false
+      deploy_on_push: true
     source_dir: scraper
     dockerfile_path: scraper/Dockerfile
 
