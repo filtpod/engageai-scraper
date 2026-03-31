@@ -31,7 +31,7 @@ jobs:
       branch: main
       deploy_on_push: false
     source_dir: scraper
-    dockerfile_path: Dockerfile
+    dockerfile_path: scraper/Dockerfile
 
     instance_size_slug: apps-s-1vcpu-0.5gb
     instance_count: 1
