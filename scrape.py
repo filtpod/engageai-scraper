@@ -167,7 +167,8 @@ def main():
                 and hubspot_client_secret
             ):
                 try:
-                    hubspot_api_client = HubSpot()
+                    # HubSpot SDK requires an auth field at initialization time.
+                    hubspot_api_client = HubSpot(access_token="bootstrap")
                     tokens_response = (
                         hubspot_api_client.auth.oauth.tokens_api.create_token(
                             grant_type="refresh_token",
@@ -235,7 +236,13 @@ def main():
                 else:
                     continue
 
-                print(response)
+                if isinstance(response, list):
+                    print(
+                        f"[run={run_number}] prospect_id={prospect_id} fetched_posts={len(response)}",
+                        flush=True,
+                    )
+                else:
+                    print(response)
 
                 if response == "invalid cookie":
                     break
@@ -288,6 +295,7 @@ def main():
                                     "num_tokens_used": num_tokens_used,
                                     "post_summary": summary,
                                     "date_scraped": now,
+                                    "is_complete": False,
                                 }
 
                                 columns = ", ".join(prospects_profile_data.keys())
@@ -338,28 +346,36 @@ def main():
                             else result["headline"]
                         )
                         profile_photo_url = result["profile_photo_url"]
-                        update_statement = f'''
+                        update_statement = """
                             UPDATE podserver_prospectsprofile
-                            SET first_name="{first_name}",
-                                last_name="{last_name}",
-                                headline="{headline}",
-                                profile_photo_url="{profile_photo_url}",
-                                last_lookup_date='{now}',
-                                is_active={int(is_active)}
-                            WHERE member_id={user_id}
-                              AND prospects_profile_url="{prospects_profile_url}"
-                        '''
-                    else:
-                        update_statement = f"""
-                            UPDATE podserver_prospectsprofile
-                            SET last_lookup_date='{now}',
-                                is_active={int(is_active)}
-                            WHERE member_id={user_id}
-                              AND prospects_profile_url='{prospects_profile_url}'
+                            SET first_name=%s,
+                                last_name=%s,
+                                headline=%s,
+                                profile_photo_url=%s,
+                                last_lookup_date=%s,
+                                is_active=%s
+                            WHERE id=%s
                         """
+                        update_values = (
+                            first_name,
+                            last_name,
+                            headline,
+                            profile_photo_url,
+                            now,
+                            int(is_active),
+                            prospect_id,
+                        )
+                    else:
+                        update_statement = """
+                            UPDATE podserver_prospectsprofile
+                            SET last_lookup_date=%s,
+                                is_active=%s
+                            WHERE id=%s
+                        """
+                        update_values = (now, int(is_active), prospect_id)
 
                     try:
-                        cursor.execute(update_statement)
+                        cursor.execute(update_statement, update_values)
                         conn.commit()
                     except Exception as e:
                         print("Error updating prospect profile", e)
