@@ -35,6 +35,7 @@ If you want all integrations enabled:
 - **HubSpot** (optional): `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`
 - **Postmark admin email**: `POSTMARK_SERVER_TOKEN`, optional `ADMIN_EMAIL`
 - **Scrape-it** (optional fallback helper): `SCRAPE_IT_API_KEY`
+- **Batch size** (optional): `SCRAPE_MAX_USERS_PER_RUN` (default `5`); runtime cap: `SCRAPE_MAX_RUNTIME_SECONDS`
 
 Example `.env`:
 
@@ -80,8 +81,14 @@ doctl apps create --spec scraper/do-app.yaml
 
 The schedule is defined in `scraper/do-app.yaml`:
 
-- Cron: `0 */12 * * *` (every 12 hours)
+- Cron: `*/10 * * * *` (every 10 minutes)
 - Time zone: `Australia/Sydney`
+
+### Batch size
+
+Each run loads at most **`SCRAPE_MAX_USERS_PER_RUN`** eligible users (default **5**), `ORDER BY last_login DESC`. This keeps runs short and easy to observe in logs; the same “most recently active” slice is processed on every run unless you change ordering or add a cursor later.
+
+- **`SCRAPE_MAX_RUNTIME_SECONDS`**: Stops the run before the App Platform ~30m job limit (default `1500`). If a run exits early, remaining users in that batch are skipped until the next scheduled invocation.
 
 ## Run once manually (recommended)
 

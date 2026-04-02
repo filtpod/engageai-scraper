@@ -10,6 +10,14 @@ from bs4 import BeautifulSoup
 now = datetime.now()
 
 
+def _request_timeout():
+    """Seconds for requests.get/post; None means no timeout (legacy behavior)."""
+    raw = os.environ.get("HTTP_REQUEST_TIMEOUT_SECONDS", "60").strip()
+    if raw == "" or raw == "0":
+        return None
+    return float(raw)
+
+
 def get_date(date_string):
     number = int(re.search(r"\d+", date_string).group())
     match = re.search(r"^(.*?)\s*•", date_string)
@@ -60,7 +68,7 @@ def get_linkedin_profile_id(profile_name, cookie, token, is_company=False):
                 f"&variables=(memberIdentity:{profile_name})"
                 "&queryId=voyagerIdentityDashProfiles.7ca063cf163e5eea69e01132b41784f9"
             )
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=_request_timeout())
         response = json.loads(response.text)
 
         try:
@@ -123,7 +131,7 @@ def get_recent_posts(li_profile_id, is_company, cookie, token):
                 f"&variables=(count:10,start:0,moduleKey:ORGANIZATION_MEMBER_FEED_DESKTOP,organizationalPageUrn:urn%3Ali%3Afsd_organizationalPage%3A{li_profile_id})"
                 "&queryId=voyagerFeedDashOrganizationalPageUpdates.ec233104c90f05569937d88705b4efc6"
             )
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=_request_timeout())
         else:
             url = (
                 "https://www.linkedin.com/voyager/api/graphql"
@@ -131,7 +139,7 @@ def get_recent_posts(li_profile_id, is_company, cookie, token):
                 f"&variables=(count:20,start:0,profileUrn:urn%3Ali%3Afsd_profile%3A{li_profile_id})"
                 "&queryId=voyagerFeedDashProfileUpdates.140fe34f4cf20ae185d73b7a142f6882"
             )
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=_request_timeout())
         response = json.loads(response.text)
 
         if is_company:
@@ -272,7 +280,7 @@ def get_profile_details(profile_name, cookie, token, is_company):
                 "&queryId=voyagerIdentityDashProfiles.2531a1a7d1d5530ad1834e0012bf7d50"
             )
 
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=_request_timeout())
         response = json.loads(response.text)
 
         first_name = None
@@ -356,6 +364,7 @@ def scrap_it(url, li_at, proxy_country):
             "https://api.scrape-it.cloud/scrape",
             json=body,
             headers={"x-api-key": api_key},
+            timeout=_request_timeout(),
         )
         print(response)
         status = response.json()["status"]
@@ -438,6 +447,7 @@ def admin_email():
         "https://api.postmarkapp.com/email/withTemplate",
         data=json.dumps(values),
         headers=headers,
+        timeout=_request_timeout(),
     )
     return {"status": contact_request.status_code}
 

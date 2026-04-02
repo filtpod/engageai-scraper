@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime, timedelta
 
 import mysql.connector
@@ -13,6 +14,28 @@ from services import (
 )
 from openai_api import azureAI, deepseekAI
 from hubspot import HubSpot
+
+
+def _existing_submission_links(cursor, user_id, post_urls, chunk_size=100):
+    """Return set of prospects_link values already stored for this member."""
+    existing = set()
+    if not post_urls:
+        return existing
+    for i in range(0, len(post_urls), chunk_size):
+        chunk = post_urls[i : i + chunk_size]
+        placeholders = ",".join(["%s"] * len(chunk))
+        cursor.execute(
+            f"""
+            SELECT prospects_link
+            FROM podserver_prospectssubmissions
+            WHERE member_id = %s
+              AND prospects_link IN ({placeholders})
+            """,
+            (user_id, *chunk),
+        )
+        for row in cursor.fetchall():
+            existing.add(row[0])
+    return existing
 
 
 def get_db_connection():
@@ -32,7 +55,26 @@ def get_db_connection():
 
 
 def main():
-    print("Scraper job starting...", flush=True)
+    run_number_raw = os.environ.get("SCRAPE_RUN_NUMBER", "").strip()
+    run_number = run_number_raw if run_number_raw else str(int(time.time()))
+
+    print(f"Scraper job starting (run={run_number})...", flush=True)
+
+    # App Platform scheduled jobs are killed around 30 minutes; stop earlier so we
+    # exit cleanly, commit work, and send admin email. Next cron run continues.
+    max_runtime_s = float(os.environ.get("SCRAPE_MAX_RUNTIME_SECONDS", "1500"))
+    start_mono = time.monotonic()
+
+    def over_budget():
+        return (time.monotonic() - start_mono) >= max_runtime_s
+
+    print(
+        f"Runtime budget: {max_runtime_s}s (set SCRAPE_MAX_RUNTIME_SECONDS to tune).",
+        flush=True,
+    )
+
+    # Cap how many eligible users to load per run (ORDER BY last_login DESC).
+    max_users_per_run = max(1, int(os.environ.get("SCRAPE_MAX_USERS_PER_RUN", "5")))
 
     # HubSpot OAuth app credentials from env
     hubspot_client_id = os.environ.get("HUBSPOT_CLIENT_ID", "")
@@ -54,20 +96,33 @@ def main():
           AND linkedin_cookie != ''
           AND linkedin_cookie IS NOT NULL
         ORDER BY last_login DESC
-        """
+        LIMIT %s
+        """,
+        (max_users_per_run,),
     )
 
     users = cursor.fetchall()
+    print(
+        f"Batch: limit={max_users_per_run} eligible_users_fetched={len(users)}",
+        flush=True,
+    )
     now = datetime.now()
 
     for user in users:
+        if over_budget():
+            print(
+                "Stopping: SCRAPE_MAX_RUNTIME_SECONDS budget exhausted (between users).",
+                flush=True,
+            )
+            break
+
         user_id = user[0]
         cookie = user[1]
         hubspot_account_id = user[2]
         hubspot_refresh_token = user[3]
         max_number_of_regenerated_AI_responses = user[4]
 
-        print("user id:", user_id)
+        print(f"[run={run_number}] user_id={user_id}", flush=True)
 
         try:
             if not cookie:
@@ -86,26 +141,62 @@ def main():
                 continue
             li_at = "li_at=" + li_at_match.group(1)
 
+            cutoff_date = (now - timedelta(hours=24)).date()
             cursor.execute(
-                f"""
+                """
                 SELECT
                     id,
                     prospects_profile_url,
                     email,
                     monitoring
                 FROM podserver_prospectsprofile
-                WHERE member_id = {user_id}
-                  AND (last_lookup_date < '{(now - timedelta(hours=24)).date()}' OR last_lookup_date IS NULL)
+                WHERE member_id = %s
+                  AND (last_lookup_date < %s OR last_lookup_date IS NULL)
                 ORDER BY last_lookup_date DESC
-                """
+                """,
+                (user_id, cutoff_date),
             )
             prospects = cursor.fetchall()
 
+            hubspot_api_client = None
+            if (
+                hubspot_account_id
+                and hubspot_refresh_token
+                and hubspot_client_id
+                and hubspot_client_secret
+            ):
+                try:
+                    hubspot_api_client = HubSpot()
+                    tokens_response = (
+                        hubspot_api_client.auth.oauth.tokens_api.create_token(
+                            grant_type="refresh_token",
+                            refresh_token=hubspot_refresh_token,
+                            client_id=hubspot_client_id,
+                            client_secret=hubspot_client_secret,
+                        )
+                    )
+                    hubspot_api_client.access_token = tokens_response.access_token
+                except Exception as hubspot_auth_err:
+                    print("HubSpot token refresh failed:", hubspot_auth_err, flush=True)
+                    hubspot_api_client = None
+
             for prospect in prospects:
+                if over_budget():
+                    print(
+                        "Stopping: SCRAPE_MAX_RUNTIME_SECONDS budget exhausted (between prospects).",
+                        flush=True,
+                    )
+                    break
+
                 prospect_id = prospect[0]
                 prospects_profile_url = prospect[1]
                 prospects_email = prospect[2]
                 monitoring = prospect[3]
+
+                print(
+                    f"[run={run_number}] prospect_id={prospect_id} prospects_profile_url={prospects_profile_url}",
+                    flush=True,
+                )
 
                 match = re.search(r"((?<=in/)|(?<=company/)).*", prospects_profile_url)
                 if not match:
@@ -152,25 +243,22 @@ def main():
                     most_recent_post_date = response[0]["date_submitted"]
                     is_active = most_recent_post_date > now - timedelta(days=30)
 
+                    post_urls_batch = [d["post_url"] for d in response]
+                    existing_submission_links = _existing_submission_links(
+                        cursor, user_id, post_urls_batch
+                    )
+
                     for data in response:
                         post_content = data["text"]
                         post_url = data["post_url"]
                         post_date = data["date_submitted"]
-
-                        cursor.execute(
-                            """
-                            SELECT id
-                            FROM podserver_prospectssubmissions
-                            WHERE member_id = %s
-                              AND prospects_link = %s
-                            LIMIT 1
-                            """,
-                            (user_id, post_url),
-                        )
-                        submission = cursor.fetchone()
+                        submission_exists = post_url in existing_submission_links
 
                         try:
-                            if not submission and post_date > now - timedelta(days=8):
+                            if (
+                                not submission_exists
+                                and post_date > now - timedelta(days=8)
+                            ):
                                 ai_response = ""
 
                                 resp1 = deepseekAI(post_content)
@@ -213,25 +301,10 @@ def main():
                                 """
                                 cursor.execute(insert_statement, values)
                                 conn.commit()
+                                existing_submission_links.add(post_url)
 
-                                if (
-                                    hubspot_account_id
-                                    and hubspot_refresh_token
-                                    and prospects_email
-                                    and hubspot_client_id
-                                    and hubspot_client_secret
-                                ):
-                                    api_client = HubSpot()
-                                    tokens_response = (
-                                        api_client.auth.oauth.tokens_api.create_token(
-                                            grant_type="refresh_token",
-                                            refresh_token=hubspot_refresh_token,
-                                            client_id=hubspot_client_id,
-                                            client_secret=hubspot_client_secret,
-                                        )
-                                    )
-                                    api_client.access_token = tokens_response.access_token
-                                    api_client.crm.timeline.events_api.create(
+                                if hubspot_api_client and prospects_email:
+                                    hubspot_api_client.crm.timeline.events_api.create(
                                         timeline_event={
                                             "eventTemplateId": 1210728,
                                             "email": prospects_email,
@@ -242,7 +315,7 @@ def main():
                                         }
                                     )
 
-                            elif submission:
+                            elif submission_exists:
                                 print("submission already exists")
 
                         except Exception as e:
