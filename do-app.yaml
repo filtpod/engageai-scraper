@@ -21,7 +21,7 @@ jobs:
   - name: prospect-scraper
     kind: SCHEDULED
     schedule:
-      cron: "0 */12 * * *"
+      cron: "*/15 * * *"
       time_zone: Australia/Sydney
 
     # Build from this repo using the Dockerfile in the scraper/ directory.
@@ -29,7 +29,7 @@ jobs:
       # Update to your actual owner/repo if different.
       repo: TeamEAI/engageai-functions
       branch: main
-      deploy_on_push: false
+      deploy_on_push: true
     source_dir: scraper
     dockerfile_path: scraper/Dockerfile
 
