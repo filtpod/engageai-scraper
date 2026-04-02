@@ -102,6 +102,7 @@ def main():
     )
 
     users = cursor.fetchall()
+    print('-------------------------------- STARTING SCRAPE --------------------------------')
     print(
         f"Batch: limit={max_users_per_run} eligible_users_fetched={len(users)}",
         flush=True,
