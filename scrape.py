@@ -3,6 +3,10 @@ import re
 import time
 from datetime import datetime, timedelta
 
+import concurrent.futures
+import threading
+from queue import Queue
+
 import mysql.connector
 
 from services import (
@@ -75,6 +79,10 @@ def main():
 
     # Cap how many eligible users to load per run (ORDER BY last_login DESC).
     max_users_per_run = max(1, int(os.environ.get("SCRAPE_MAX_USERS_PER_RUN", "5")))
+
+    # Parallelism knobs (prospects processed in parallel, DB writes serialized).
+    max_workers = max(1, int(os.environ.get("SCRAPE_MAX_WORKERS", "4")))
+    write_queue_size = max(1, int(os.environ.get("SCRAPE_WRITE_QUEUE_SIZE", "50")))
 
     # HubSpot OAuth app credentials from env
     hubspot_client_id = os.environ.get("HUBSPOT_CLIENT_ID", "")
@@ -182,156 +190,243 @@ def main():
                     print("HubSpot token refresh failed:", hubspot_auth_err, flush=True)
                     hubspot_api_client = None
 
-            for prospect in prospects:
-                if over_budget():
-                    print(
-                        "Stopping: SCRAPE_MAX_RUNTIME_SECONDS budget exhausted (between prospects).",
-                        flush=True,
-                    )
-                    break
+            # Prospect processing in parallel with a single DB writer.
+            write_queue: Queue = Queue(maxsize=write_queue_size)
+            invalid_cookie_event = threading.Event()
 
-                prospect_id = prospect[0]
-                prospects_profile_url = prospect[1]
-                prospects_email = prospect[2]
-                monitoring = prospect[3]
+            worker_local = threading.local()
+            read_conns = []
+            read_conns_lock = threading.Lock()
+
+            def get_worker_cursor():
+                cur = getattr(worker_local, "cursor", None)
+                if cur is not None:
+                    return cur
+
+                read_conn = get_db_connection()
+                read_cursor = read_conn.cursor()
+                worker_local.conn = read_conn
+                worker_local.cursor = read_cursor
+                with read_conns_lock:
+                    read_conns.append(read_conn)
+                return read_cursor
+
+            def writer_loop():
+                write_conn = get_db_connection()
+                write_cursor = write_conn.cursor()
+                try:
+                    while True:
+                        item = write_queue.get()
+                        if item is None:
+                            break
+                        if over_budget():
+                            # Keep draining the queue to avoid deadlocks when
+                            # the main thread is still trying to enqueue results.
+                            continue
+
+                        inserts = item.get("inserts", [])
+                        update_statement = item.get("update_statement")
+                        update_values = item.get("update_values")
+
+                        for ins in inserts:
+                            try:
+                                write_cursor.execute(
+                                    ins["insert_statement"], ins["values"]
+                                )
+                                write_conn.commit()
+
+                                # TODO: Re-enable HubSpot timeline writes after threaded
+                                # pipeline is validated in production.
+                                time.sleep(0.25)  # simulate HubSpot API latency
+                                # hubspot_event = ins.get("hubspot_event")
+                                # if hubspot_api_client and hubspot_event:
+                                #     hubspot_api_client.crm.timeline.events_api.create(
+                                #         timeline_event=hubspot_event
+                                #     )
+                            except Exception as e:
+                                print(
+                                    f"Error inserting submission run={run_number} user_id={item.get('user_id')} prospect_id={item.get('prospect_id')}: {e}",
+                                    flush=True,
+                                )
+
+                        if update_statement:
+                            try:
+                                write_cursor.execute(
+                                    update_statement, update_values
+                                )
+                                write_conn.commit()
+                            except Exception as e:
+                                print(
+                                    f"Error updating prospect profile run={run_number} user_id={item.get('user_id')} prospect_id={item.get('prospect_id')}: {e}",
+                                    flush=True,
+                                )
+                finally:
+                    try:
+                        write_cursor.close()
+                    except Exception:
+                        pass
+                    try:
+                        write_conn.close()
+                    except Exception:
+                        pass
+
+            writer_thread = threading.Thread(target=writer_loop, daemon=True)
+            writer_thread.start()
+
+            def prospect_worker(prospect_row):
+                if invalid_cookie_event.is_set() or over_budget():
+                    return None
+
+                prospect_id_local = prospect_row[0]
+                prospects_profile_url_local = prospect_row[1]
+                prospects_email_local = prospect_row[2]
+                monitoring_local = prospect_row[3]
 
                 print(
-                    f"[run={run_number}] prospect_id={prospect_id} prospects_profile_url={prospects_profile_url}",
+                    f"[run={run_number}] prospect_id={prospect_id_local} prospects_profile_url={prospects_profile_url_local}",
                     flush=True,
                 )
 
-                match = re.search(r"((?<=in/)|(?<=company/)).*", prospects_profile_url)
-                if not match:
-                    continue
-
-                profile_name = match.group(0).split("/")[0]
-
-                if "company" in prospects_profile_url:
-                    is_company = True
-                    url = (
-                        "https://www.linkedin.com/company/"
-                        + profile_name
-                        + "/posts/?feedView=all"
+                try:
+                    match_local = re.search(
+                        r"((?<=in/)|(?<=company/)).*",
+                        prospects_profile_url_local,
                     )
-                else:
-                    is_company = False
-                    url = (
-                        "https://www.linkedin.com/in/"
-                        + profile_name
-                        + "/recent-activity/all/"
+                    if not match_local:
+                        return None
+
+                    profile_name_local = match_local.group(0).split("/")[0]
+
+                    if "company" in prospects_profile_url_local:
+                        is_company_local = True
+                    else:
+                        is_company_local = False
+
+                    if not monitoring_local:
+                        return None
+
+                    li_profile_id = get_linkedin_profile_id(
+                        profile_name_local, cookie, token, is_company_local
                     )
+                    if li_profile_id in (401, 403, 503):
+                        return None
+                    if li_profile_id is None:
+                        return None
 
-                if not monitoring:
-                    continue
-
-                li_profile_id = get_linkedin_profile_id(
-                    profile_name, cookie, token, is_company
-                )
-                if li_profile_id in (401, 403, 503):
-                    continue
-                elif li_profile_id is not None:
                     response = get_recent_posts(
-                        li_profile_id, is_company, cookie, token
+                        li_profile_id, is_company_local, cookie, token
                     )
-                else:
-                    continue
 
-                if isinstance(response, list):
+                    if isinstance(response, list):
+                        print(
+                            f"[run={run_number}] prospect_id={prospect_id_local} fetched_posts={len(response)}",
+                            flush=True,
+                        )
+                    else:
+                        print(response)
+
+                    if response == "invalid cookie":
+                        invalid_cookie_event.set()
+                        return {"type": "invalid_cookie"}
+
+                    if response is None or len(response) == 0:
+                        return None
+
                     print(
-                        f"[run={run_number}] prospect_id={prospect_id} fetched_posts={len(response)}",
+                        f"success run={run_number} user_id={user_id} prospect_id={prospect_id_local}",
                         flush=True,
                     )
-                else:
-                    print(response)
-
-                if response == "invalid cookie":
-                    break
-                elif response is not None and len(response) > 0:
-                    print("success")
                     most_recent_post_date = response[0]["date_submitted"]
-                    is_active = most_recent_post_date > now - timedelta(days=30)
+                    is_active_local = most_recent_post_date > now - timedelta(days=30)
 
+                    # Read-only existence check in worker to avoid wasted DeepSeek.
                     post_urls_batch = [d["post_url"] for d in response]
+                    read_cursor = get_worker_cursor()
                     existing_submission_links = _existing_submission_links(
-                        cursor, user_id, post_urls_batch
+                        read_cursor, user_id, post_urls_batch
                     )
 
+                    inserts = []
                     for data in response:
                         post_content = data["text"]
                         post_url = data["post_url"]
                         post_date = data["date_submitted"]
                         submission_exists = post_url in existing_submission_links
 
+                        if submission_exists:
+                            continue
+                        if post_date <= now - timedelta(days=8):
+                            continue
+
+                        ai_response = ""
+                        resp1 = deepseekAI(post_content)
                         try:
-                            if (
-                                not submission_exists
-                                and post_date > now - timedelta(days=8)
-                            ):
-                                ai_response = ""
+                            print(
+                                f"DeepSeek AI run={run_number} user_id={user_id} prospect_id={prospect_id_local}:",
+                                resp1,
+                                flush=True,
+                            )
+                            summary = resp1.choices[0].message.content
+                            num_tokens_used = resp1.usage.total_tokens
+                        except Exception:
+                            summary = post_content[:300]
+                            num_tokens_used = 0
 
-                                resp1 = deepseekAI(post_content)
-                                try:
-                                    print("DeepSeek AI:", resp1)
-                                    summary = resp1.choices[0].message.content
-                                    num_tokens_used = resp1.usage.total_tokens
-                                except Exception:
-                                    summary = post_content[:300]
-                                    num_tokens_used = 0
+                        print(
+                            f"DeepSeek summary run={run_number} user_id={user_id} prospect_id={prospect_id_local}:",
+                            summary,
+                            flush=True,
+                        )
+                        post_content_clean = (
+                            post_content.encode("ascii", "ignore").decode("UTF-8")
+                        )
 
-                                print(summary)
-                                post_content_clean = (
-                                    post_content.encode("ascii", "ignore").decode(
-                                        "UTF-8"
-                                    )
-                                )
+                        prospects_profile_data = {
+                            "member_id": user_id,
+                            "prospects_link": post_url,
+                            "date_submitted": post_date,
+                            "post_content": post_content_clean,
+                            "prospects_profile_url": prospects_profile_url_local,
+                            "max_num_regenerations": max_number_of_regenerated_AI_responses,
+                            "num_tokens_used": num_tokens_used,
+                            "post_summary": summary,
+                            "date_scraped": now,
+                            "is_complete": False,
+                        }
 
-                                prospects_profile_data = {
-                                    "member_id": user_id,
-                                    "prospects_link": post_url,
-                                    "date_submitted": post_date,
-                                    "post_content": post_content_clean,
-                                    "prospects_profile_url": prospects_profile_url,
-                                    "max_num_regenerations": max_number_of_regenerated_AI_responses,
-                                    "num_tokens_used": num_tokens_used,
-                                    "post_summary": summary,
-                                    "date_scraped": now,
-                                    "is_complete": False,
-                                }
+                        columns = ", ".join(prospects_profile_data.keys())
+                        placeholders = ", ".join(
+                            ["%s"] * len(prospects_profile_data.keys())
+                        )
+                        values = tuple(prospects_profile_data.values())
 
-                                columns = ", ".join(prospects_profile_data.keys())
-                                placeholders = ", ".join(
-                                    ["%s"] * len(prospects_profile_data.keys())
-                                )
-                                values = tuple(prospects_profile_data.values())
+                        insert_statement = f"""
+                            INSERT INTO podserver_prospectssubmissions ({columns})
+                            VALUES ({placeholders})
+                        """
 
-                                insert_statement = f"""
-                                    INSERT INTO podserver_prospectssubmissions ({columns})
-                                    VALUES ({placeholders})
-                                """
-                                cursor.execute(insert_statement, values)
-                                conn.commit()
-                                existing_submission_links.add(post_url)
+                        hubspot_event = None
+                        if hubspot_api_client and prospects_email_local:
+                            hubspot_event = {
+                                "eventTemplateId": 1210728,
+                                "email": prospects_email_local,
+                                "tokens": {
+                                    "linkedin_post_url": post_url,
+                                    "suggested_comment": ai_response,
+                                },
+                            }
 
-                                if hubspot_api_client and prospects_email:
-                                    hubspot_api_client.crm.timeline.events_api.create(
-                                        timeline_event={
-                                            "eventTemplateId": 1210728,
-                                            "email": prospects_email,
-                                            "tokens": {
-                                                "linkedin_post_url": post_url,
-                                                "suggested_comment": ai_response,
-                                            },
-                                        }
-                                    )
-
-                            elif submission_exists:
-                                print("submission already exists")
-
-                        except Exception as e:
-                            print("Error", e)
+                        inserts.append(
+                            {
+                                "insert_statement": insert_statement,
+                                "values": values,
+                                "hubspot_event": hubspot_event,
+                            }
+                        )
+                        existing_submission_links.add(post_url)
 
                     result = get_profile_details(
-                        profile_name, cookie, token, is_company
+                        profile_name_local, cookie, token, is_company_local
                     )
                     if isinstance(result, dict):
                         first_name = remove_emojis(result["first_name"])
@@ -362,8 +457,8 @@ def main():
                             headline,
                             profile_photo_url,
                             now,
-                            int(is_active),
-                            prospect_id,
+                            int(is_active_local),
+                            prospect_id_local,
                         )
                     else:
                         update_statement = """
@@ -372,14 +467,67 @@ def main():
                                 is_active=%s
                             WHERE id=%s
                         """
-                        update_values = (now, int(is_active), prospect_id)
+                        update_values = (
+                            now,
+                            int(is_active_local),
+                            prospect_id_local,
+                        )
 
-                    try:
-                        cursor.execute(update_statement, update_values)
-                        conn.commit()
-                    except Exception as e:
-                        print("Error updating prospect profile", e)
-                        continue
+                    return {
+                        "user_id": user_id,
+                        "prospect_id": prospect_id_local,
+                        "inserts": inserts,
+                        "update_statement": update_statement,
+                        "update_values": update_values,
+                    }
+                except Exception as e:
+                    print(
+                        f"Error in prospect_worker run={run_number} user_id={user_id} prospect_id={prospect_id_local}: {e}",
+                        flush=True,
+                    )
+                    return None
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                futures = []
+                for prospect_row in prospects:
+                    if over_budget():
+                        print(
+                            "Stopping: SCRAPE_MAX_RUNTIME_SECONDS budget exhausted (between prospects).",
+                            flush=True,
+                        )
+                        break
+                    if invalid_cookie_event.is_set():
+                        break
+                    futures.append(executor.submit(prospect_worker, prospect_row))
+
+                try:
+                    for fut in concurrent.futures.as_completed(futures):
+                        result = fut.result()
+                        if result is None:
+                            continue
+                        if result.get("type") == "invalid_cookie":
+                            invalid_cookie_event.set()
+                            break
+                        if invalid_cookie_event.is_set() or over_budget():
+                            continue
+                        write_queue.put(result)
+                finally:
+                    # Ensure we don't block forever on workers that may still be running.
+                    for fut in futures:
+                        if not fut.done():
+                            fut.cancel()
+
+            write_queue.put(None)
+            writer_thread.join()
+
+            # Cleanup any per-thread DB connections.
+            for c in read_conns:
+                try:
+                    c.close()
+                except Exception:
+                    pass
 
         except Exception as e:
             print("Top-level user loop error:", e)

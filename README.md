@@ -36,6 +36,7 @@ If you want all integrations enabled:
 - **Postmark admin email**: `POSTMARK_SERVER_TOKEN`, optional `ADMIN_EMAIL`
 - **Scrape-it** (optional fallback helper): `SCRAPE_IT_API_KEY`
 - **Batch size** (optional): `SCRAPE_MAX_USERS_PER_RUN` (default `5`); runtime cap: `SCRAPE_MAX_RUNTIME_SECONDS`
+- **Parallel prospect scraping** (optional): `SCRAPE_MAX_WORKERS` (default `4`), `SCRAPE_WRITE_QUEUE_SIZE` (default `50`)
 
 Example `.env`:
 
@@ -89,6 +90,15 @@ The schedule is defined in `scraper/do-app.yaml`:
 Each run loads at most **`SCRAPE_MAX_USERS_PER_RUN`** eligible users (default **5**), `ORDER BY last_login DESC`. This keeps runs short and easy to observe in logs; the same “most recently active” slice is processed on every run unless you change ordering or add a cursor later.
 
 - **`SCRAPE_MAX_RUNTIME_SECONDS`**: Stops the run before the App Platform ~30m job limit (default `1500`). If a run exits early, remaining users in that batch are skipped until the next scheduled invocation.
+
+### Parallelism (safe throughput)
+
+Prospects are scraped concurrently using a worker pool, while database writes are serialized through a single writer loop (so you should not see concurrency-related DB corruption).
+
+- **`SCRAPE_MAX_WORKERS`** (default `4`): number of concurrent prospect workers per run.
+  - Rollback: set `SCRAPE_MAX_WORKERS=1` to effectively disable parallelism while keeping the same code path.
+- **`SCRAPE_WRITE_QUEUE_SIZE`** (default `50`): bounded in-memory queue size between workers and the single writer.
+  - If you increase workers, keep this conservative first to avoid large memory spikes.
 
 ## Run once manually (recommended)
 
