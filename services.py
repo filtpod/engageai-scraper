@@ -1,6 +1,8 @@
 import json
 import os
+import random
 import re
+import time
 from datetime import datetime, timedelta
 from operator import itemgetter
 
@@ -16,6 +18,78 @@ def _request_timeout():
     if raw == "" or raw == "0":
         return None
     return float(raw)
+
+
+def _sleep_backoff(attempt, base_backoff=0.5):
+    """Short exponential backoff with light jitter."""
+    delay = base_backoff * (2 ** (attempt - 1)) + random.uniform(0, 0.2)
+    time.sleep(delay)
+
+
+def _linkedin_get_json_with_retries(url, headers, context, max_attempts=3):
+    """
+    GET LinkedIn GraphQL JSON with bounded retries.
+    Retries on request exceptions, 429/5xx, and JSON decode failures.
+    Returns (payload_dict_or_none, http_status_or_none).
+    """
+    last_status = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=_request_timeout())
+            last_status = response.status_code
+        except requests.RequestException as e:
+            print(
+                f"linkedin_retry context={context} reason=request_exception "
+                f"attempt={attempt}/{max_attempts} err={type(e).__name__}",
+                flush=True,
+            )
+            if attempt < max_attempts:
+                _sleep_backoff(attempt)
+                continue
+            print(
+                f"linkedin_failed context={context} reason=request_exception "
+                f"attempts={max_attempts}",
+                flush=True,
+            )
+            return None, None
+
+        if response.status_code == 429 or 500 <= response.status_code < 600:
+            print(
+                f"linkedin_retry context={context} reason=http_status "
+                f"status={response.status_code} attempt={attempt}/{max_attempts}",
+                flush=True,
+            )
+            if attempt < max_attempts:
+                _sleep_backoff(attempt)
+                continue
+            print(
+                f"linkedin_failed context={context} reason=http_status "
+                f"status={response.status_code} attempts={max_attempts}",
+                flush=True,
+            )
+            return None, response.status_code
+
+        try:
+            return json.loads(response.text), response.status_code
+        except json.JSONDecodeError:
+            body_preview = (response.text or "").strip().replace("\n", " ")[:80]
+            print(
+                f"linkedin_retry context={context} reason=json_decode "
+                f"status={response.status_code} attempt={attempt}/{max_attempts} "
+                f"body_preview={body_preview!r}",
+                flush=True,
+            )
+            if attempt < max_attempts:
+                _sleep_backoff(attempt)
+                continue
+            print(
+                f"linkedin_failed context={context} reason=json_decode "
+                f"status={response.status_code} attempts={max_attempts}",
+                flush=True,
+            )
+            return None, response.status_code
+
+    return None, last_status
 
 
 def get_date(date_string):
@@ -68,8 +142,15 @@ def get_linkedin_profile_id(profile_name, cookie, token, is_company=False):
                 f"&variables=(memberIdentity:{profile_name})"
                 "&queryId=voyagerIdentityDashProfiles.7ca063cf163e5eea69e01132b41784f9"
             )
-        response = requests.get(url, headers=headers, timeout=_request_timeout())
-        response = json.loads(response.text)
+        response, status_code = _linkedin_get_json_with_retries(
+            url,
+            headers,
+            context=f"profile_id:{profile_name}",
+        )
+        if response is None:
+            if status_code in (401, 403, 503):
+                return status_code
+            return None
 
         try:
             if is_company:
@@ -94,13 +175,15 @@ def get_linkedin_profile_id(profile_name, cookie, token, is_company=False):
                 return 401
             elif "status" in response["data"] and response["data"]["status"] == 403:
                 return 403
+            elif "status" in response["data"] and response["data"]["status"] == 503:
+                return 503
             elif "errors" in response["data"]:
                 print("error in LI profile data")
-            elif hasattr(response, "status_code") and response.status_code == 403:
+            elif status_code == 403:
                 return 403
-            elif hasattr(response, "status_code") and response.status_code == 401:
+            elif status_code == 401:
                 return 401
-            elif hasattr(response, "status_code") and response.status_code == 503:
+            elif status_code == 503:
                 return 503
             return None
 
@@ -131,7 +214,11 @@ def get_recent_posts(li_profile_id, is_company, cookie, token):
                 f"&variables=(count:10,start:0,moduleKey:ORGANIZATION_MEMBER_FEED_DESKTOP,organizationalPageUrn:urn%3Ali%3Afsd_organizationalPage%3A{li_profile_id})"
                 "&queryId=voyagerFeedDashOrganizationalPageUpdates.ec233104c90f05569937d88705b4efc6"
             )
-            response = requests.get(url, headers=headers, timeout=_request_timeout())
+            response, _ = _linkedin_get_json_with_retries(
+                url,
+                headers,
+                context=f"recent_posts:company:{li_profile_id}",
+            )
         else:
             url = (
                 "https://www.linkedin.com/voyager/api/graphql"
@@ -139,8 +226,13 @@ def get_recent_posts(li_profile_id, is_company, cookie, token):
                 f"&variables=(count:20,start:0,profileUrn:urn%3Ali%3Afsd_profile%3A{li_profile_id})"
                 "&queryId=voyagerFeedDashProfileUpdates.140fe34f4cf20ae185d73b7a142f6882"
             )
-            response = requests.get(url, headers=headers, timeout=_request_timeout())
-        response = json.loads(response.text)
+            response, _ = _linkedin_get_json_with_retries(
+                url,
+                headers,
+                context=f"recent_posts:person:{li_profile_id}",
+            )
+        if response is None:
+            return None
 
         if is_company:
             recent_posts_ids = response["data"]["data"][
@@ -280,8 +372,13 @@ def get_profile_details(profile_name, cookie, token, is_company):
                 "&queryId=voyagerIdentityDashProfiles.2531a1a7d1d5530ad1834e0012bf7d50"
             )
 
-        response = requests.get(url, headers=headers, timeout=_request_timeout())
-        response = json.loads(response.text)
+        response, _ = _linkedin_get_json_with_retries(
+            url,
+            headers,
+            context=f"profile_details:{profile_name}",
+        )
+        if response is None:
+            return None
 
         first_name = None
         last_name = None

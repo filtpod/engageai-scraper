@@ -393,11 +393,10 @@ def main():
             )
             if isinstance(result, dict):
                 first_name = remove_emojis(result["first_name"])
-                last_name = (
-                    remove_emojis(result["last_name"])
-                    if result["last_name"]
-                    else result["last_name"]
-                )
+                # DB column is NOT NULL; LinkedIn profile fields can be missing/None.
+                # Coerce falsy values to "" to avoid writer exceptions.
+                last_name_raw = result.get("last_name")
+                last_name = remove_emojis(last_name_raw) if last_name_raw else ""
                 headline = (
                     remove_emojis(result["headline"])
                     if result["headline"]
