@@ -1,13 +1,23 @@
-# Scraper Job (DigitalOcean App Platform)
+# Scraper Job
 
-This folder contains a **standalone DigitalOcean App Platform Job** that runs the LinkedIn scraping workflow on a schedule and exits.
+Runs the LinkedIn scraping workflow: eligible users from MySQL, recent posts per prospect, DeepSeek summaries, DB writes, optional HubSpot (stubbed), admin email at end.
 
-## What this does
+**Recommended production setup:** a **DigitalOcean Droplet** running the **Docker** image on a **cron** schedule (no 30-minute job limit, tunable parallelism). The repo includes **`do-app.yaml`**, a **cloud-init** user-data file to install Docker, clone the repo, build the image, and install cron (not an App Platform spec).
 
-- Connects to the same managed MySQL database used by the rest of this repo (via env vars).
-- Iterates eligible users, fetches prospects, scrapes recent LinkedIn posts, stores submissions, updates prospect profiles.
-- Optionally pushes timeline events to HubSpot (if HubSpot OAuth env vars are set).
-- Sends an admin notification email at the end via Postmark.
+## Architecture
+
+**Parallelize by user, not by prospect:** each user has a **distinct LinkedIn cookie** (rate-limit bucket). Many users are processed concurrently; **within one user**, prospects run **one after another** so the same cookie is not hammered with parallel LinkedIn calls.
+
+```text
+ThreadPoolExecutor (SCRAPE_MAX_WORKERS users at once)
+  └── user_worker(user)
+        └── for each prospect: LinkedIn + DeepSeek → enqueue writes
+
+Single writer thread + Queue (SCRAPE_WRITE_QUEUE_SIZE)
+  └── INSERT submissions, UPDATE prospect profile (serialized commits)
+```
+
+User work is **batched** when submitting to the pool so tens of thousands of `Future` objects are not created at once.
 
 ## Files
 
@@ -15,28 +25,36 @@ This folder contains a **standalone DigitalOcean App Platform Job** that runs th
 - `services.py`: LinkedIn helpers + Postmark admin email
 - `openai_api.py`: Azure OpenAI + DeepSeek summarization helpers
 - `requirements.txt`: Python deps
-- `Dockerfile`: container image for the job
-- `do-app.yaml`: **separate** App Platform app spec for this job
+- `Dockerfile`: container image
+- `do-app.yaml`: Droplet **cloud-init** (user data) — see below
 
-## Required environment variables
+## Environment variables
 
-At minimum, the scraper needs DB access:
+**Database (required):** `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
 
-- `DB_HOST`
-- `DB_PORT`
-- `DB_NAME`
-- `DB_USER`
-- `DB_PASSWORD`
+**Integrations:**
 
-If you want all integrations enabled:
-
-- **DeepSeek**: `DEEPSEEK_API_KEY` (used by default in `scrape.py`)
+- **DeepSeek**: `DEEPSEEK_API_KEY` (used in `scrape.py`)
 - **Azure OpenAI** (optional): `AZUREAI_API_KEY`, `AZUREAI_ENDPOINT`, `AZUREAI_DEPLOYMENT`
 - **HubSpot** (optional): `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`
-- **Postmark admin email**: `POSTMARK_SERVER_TOKEN`, optional `ADMIN_EMAIL`
-- **Scrape-it** (optional fallback helper): `SCRAPE_IT_API_KEY`
-- **Batch size** (optional): `SCRAPE_MAX_USERS_PER_RUN` (default `5`); runtime cap: `SCRAPE_MAX_RUNTIME_SECONDS`
-- **Parallel prospect scraping** (optional): `SCRAPE_MAX_WORKERS` (default `4`), `SCRAPE_WRITE_QUEUE_SIZE` (default `50`)
+- **Postmark**: `POSTMARK_SERVER_TOKEN`, optional `ADMIN_EMAIL`
+- **Scrape-it** (optional helper in `services.py`): `SCRAPE_IT_API_KEY`
+
+**Parallelism (defaults tuned for a 4 GB droplet):**
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SCRAPE_MAX_WORKERS` | `32` | Concurrent **users** (each user’s prospects run sequentially). |
+| `SCRAPE_WRITE_QUEUE_SIZE` | `200` | Max queued write batches before workers block. |
+
+**Lock file (overlapping cron runs):**
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SCRAPE_LOCK_FILE` | `/tmp/scraper.lock` | PID file; second run exits if the first is still alive. |
+| `SCRAPE_LOCK_DISABLED` | unset | Set to `1` / `true` / `yes` to disable the lock (e.g. local dev). |
+
+**Optional:** `SCRAPE_RUN_NUMBER` for log correlation.
 
 Example `.env`:
 
@@ -49,90 +67,91 @@ DB_PASSWORD=your_password_here
 
 DEEPSEEK_API_KEY=your_deepseek_key
 
-AZUREAI_API_KEY=your_azure_openai_key
-AZUREAI_ENDPOINT=https://your-resource-name.openai.azure.com/
-AZUREAI_DEPLOYMENT=gpt-4o-mini
-
 HUBSPOT_CLIENT_ID=your_hubspot_oauth_client_id
 HUBSPOT_CLIENT_SECRET=your_hubspot_oauth_client_secret
 
 POSTMARK_SERVER_TOKEN=your_postmark_server_token
 ADMIN_EMAIL=hello@engage-ai.co
 
-SCRAPE_IT_API_KEY=your_scrape_it_key
+SCRAPE_MAX_WORKERS=32
+SCRAPE_WRITE_QUEUE_SIZE=200
 ```
 
-## Deploy as a separate App Platform App (Job)
+## Deploy on a DigitalOcean Droplet (recommended)
 
-1. Ensure `scraper/do-app.yaml` points at the correct GitHub repo/branch.
-2. Create the app:
+**Droplet size:** start with **`s-2vcpu-4gb`** (Sydney or your DB region). Workload is I/O-bound; 2 vCPUs and 4 GB RAM are enough for ~32 concurrent user workers. Increase `SCRAPE_MAX_WORKERS` only if memory stays comfortable and APIs/DB allow it.
+
+### Droplet cloud-init (`do-app.yaml`)
+
+`do-app.yaml` is **[cloud-init](https://cloudinit.readthedocs.io/)** user data. The first line must stay `#cloud-config`. Edit the `git clone` URL and branch inside the `runcmd` script if your fork or default branch differs.
+
+**Create via UI:** New Droplet → **Advanced options** → **Add Initialization scripts** → paste the contents of `do-app.yaml`.
+
+**Create via CLI:**
 
 ```bash
-doctl apps create --spec scraper/do-app.yaml
+doctl compute droplet create scraper-1 \
+  --image ubuntu-22-04-x64 \
+  --size s-2vcpu-4gb \
+  --region syd \
+  --user-data-file do-app.yaml \
+  --ssh-keys <your-key-id>
 ```
 
-3. In the DigitalOcean Control Panel:
-   - Go to **Apps** → your new app (`engageai-scraper-job`)
-   - Select the **Job** component `prospect-scraper`
-   - Set the environment variables listed above
-   - Add this App as a **Trusted Source** on your Managed Database:
-     - Database → Settings → Trusted sources → Quick select → Apps
+After the droplet boots: **SSH in**, edit `/opt/engageai-scraper/.env` with real values (the bootstrap only creates a placeholder), then rebuild if needed: `docker build -t engageai-scraper /opt/engageai-scraper`. Add the droplet’s IP to **Managed Database → Trusted sources**.
 
-### Schedule
+**Logs:** `tail -f /var/log/engageai-scraper.log`
 
-The schedule is defined in `scraper/do-app.yaml`:
+Private Git repos need a [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys/deploy-keys) or other clone method; adjust the `runcmd` clone step accordingly.
 
-- Cron: `*/10 * * * *` (every 10 minutes)
-- Time zone: `Australia/Sydney`
+### Manual setup (same layout as cloud-init)
 
-### Batch size
+1. Create a droplet (Ubuntu; install Docker if not using cloud-init).
+2. Add the droplet IP to your **Managed Database trusted sources** (if applicable).
+3. On the droplet:
 
-Each run loads at most **`SCRAPE_MAX_USERS_PER_RUN`** eligible users (default **5**), `ORDER BY last_login DESC`. This keeps runs short and easy to observe in logs; the same “most recently active” slice is processed on every run unless you change ordering or add a cursor later.
+```bash
+git clone <your-repo> /opt/engageai-scraper && cd /opt/engageai-scraper
+docker build -t engageai-scraper .
+# Put secrets in /opt/engageai-scraper/.env (see above)
+```
 
-- **`SCRAPE_MAX_RUNTIME_SECONDS`**: Stops the run before the App Platform ~30m job limit (default `1500`). If a run exits early, remaining users in that batch are skipped until the next scheduled invocation.
+4. **Cron** (overlap is prevented by the lock file); match what `do-app.yaml` installs:
 
-### Parallelism (safe throughput)
+```cron
+0 */12 * * * docker run --rm --env-file /opt/engageai-scraper/.env engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+```
 
-Prospects are scraped concurrently using a worker pool, while database writes are serialized through a single writer loop (so you should not see concurrency-related DB corruption).
+5. **Logs:** `tail -f /var/log/engageai-scraper.log` or your log shipper.
 
-- **`SCRAPE_MAX_WORKERS`** (default `4`): number of concurrent prospect workers per run.
-  - Rollback: set `SCRAPE_MAX_WORKERS=1` to effectively disable parallelism while keeping the same code path.
-- **`SCRAPE_WRITE_QUEUE_SIZE`** (default `50`): bounded in-memory queue size between workers and the single writer.
-  - If you increase workers, keep this conservative first to avoid large memory spikes.
+**Tuning:** If LinkedIn or DeepSeek throttles, lower `SCRAPE_MAX_WORKERS`. If the writer falls behind (queue full / workers block), raise `SCRAPE_WRITE_QUEUE_SIZE` slightly or check DB latency.
 
-## Run once manually (recommended)
+## Deploy as App Platform Job (optional)
 
-After the app is created and env vars are set:
+You can run this workload as a **scheduled Job** on App Platform instead of a Droplet: create an app in the control panel (or `doctl apps create` with a separate **App spec** YAML), point the job at this repo’s `Dockerfile`, set environment variables there, and add the app as a DB trusted source.
 
-1. In the app page, open **Activity** → **Jobs**
-2. Trigger a manual run (UI action is typically “Run job” / “Run now”)
-3. Inspect logs for errors
-4. Confirm side-effects:
-   - New records in `podserver_prospectssubmissions`
-   - Updated fields in `podserver_prospectsprofile`
-   - Admin email sent via Postmark
+Note: App Platform scheduled jobs often have an **execution time limit** (on the order of tens of minutes); long full-fleet runs are usually better on a droplet.
 
 ## Local testing
 
-### Run with Python
+### Python
 
 ```bash
-cd scraper
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-# Ensure env vars are set in your shell, or use a loader like direnv.
+export SCRAPE_LOCK_DISABLED=1
+# set DB_* and other vars
 python scrape.py
 ```
 
-### Run with Docker (closest to DO runtime)
+### Docker
 
 ```bash
-cd scraper
 docker build -t engageai-scraper .
-
-# If you have an env file at the repo root:
-docker run --env-file ../.env engageai-scraper
+docker run --rm --env-file .env -e SCRAPE_LOCK_DISABLED=1 engageai-scraper
 ```
 
+## Manual run on App Platform
+
+Use **Activity → Jobs → Run** and watch logs for errors; confirm rows in `podserver_prospectssubmissions` / `podserver_prospectsprofile` and the admin email.
