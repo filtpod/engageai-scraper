@@ -1,6 +1,6 @@
 # Scraper Job
 
-Runs the LinkedIn scraping workflow: eligible users from MySQL, recent posts per prospect, DeepSeek summaries, DB writes, optional HubSpot (stubbed), admin email at end.
+Runs the LinkedIn scraping workflow: eligible users from MySQL, recent posts per prospect, DeepSeek summaries, DB writes, and admin email at end.
 
 **Recommended production setup:** a **DigitalOcean Droplet** running the **Docker** image on a **cron** schedule (no 30-minute job limit, tunable parallelism). The repo includes **`do-app.yaml`**, a **cloud-init** user-data file to install Docker, clone the repo, build the image, and install cron (not an App Platform spec).
 
@@ -36,7 +36,6 @@ User work is **batched** when submitting to the pool so tens of thousands of `Fu
 
 - **DeepSeek**: `DEEPSEEK_API_KEY` (used in `scrape.py`)
 - **Azure OpenAI** (optional): `AZUREAI_API_KEY`, `AZUREAI_ENDPOINT`, `AZUREAI_DEPLOYMENT`
-- **HubSpot** (optional): `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET`
 - **Postmark**: `POSTMARK_SERVER_TOKEN`, optional `ADMIN_EMAIL`
 - **Scrape-it** (optional helper in `services.py`): `SCRAPE_IT_API_KEY`
 
@@ -66,9 +65,6 @@ DB_USER=doadmin
 DB_PASSWORD=your_password_here
 
 DEEPSEEK_API_KEY=your_deepseek_key
-
-HUBSPOT_CLIENT_ID=your_hubspot_oauth_client_id
-HUBSPOT_CLIENT_SECRET=your_hubspot_oauth_client_secret
 
 POSTMARK_SERVER_TOKEN=your_postmark_server_token
 ADMIN_EMAIL=hello@engage-ai.co

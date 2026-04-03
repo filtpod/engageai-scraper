@@ -18,7 +18,6 @@ from services import (
     remove_emojis,
 )
 from openai_api import deepseekAI
-from hubspot import HubSpot
 
 
 def _existing_submission_links(cursor, user_id, post_urls, chunk_size=100):
@@ -135,10 +134,6 @@ def main():
     max_workers = max(1, int(os.environ.get("SCRAPE_MAX_WORKERS", "32")))
     write_queue_size = max(1, int(os.environ.get("SCRAPE_WRITE_QUEUE_SIZE", "200")))
 
-    # HubSpot OAuth app credentials from env
-    hubspot_client_id = os.environ.get("HUBSPOT_CLIENT_ID", "")
-    hubspot_client_secret = os.environ.get("HUBSPOT_CLIENT_SECRET", "")
-
     conn = get_db_connection(verbose=True)
     cursor = conn.cursor()
 
@@ -147,8 +142,6 @@ def main():
         SELECT
             id,
             linkedin_cookie,
-            hubspot_account_id,
-            hubspot_refresh_token,
             max_number_of_regenerated_AI_responses
         FROM podserver_customuser
         WHERE `group` IN ('Member', 'Growth Plan', 'Trial', 'Premium', 'Starter')
@@ -195,36 +188,50 @@ def main():
                 inserts = item.get("inserts", [])
                 update_statement = item.get("update_statement")
                 update_values = item.get("update_values")
-                hubspot_api_client = item.get("hubspot_api_client")
 
-                for ins in inserts:
-                    try:
-                        write_cursor.execute(ins["insert_statement"], ins["values"])
-                        write_conn.commit()
+                try:
+                    # Batch submission inserts per SQL template, then commit once.
+                    if inserts:
+                        grouped_values = {}
+                        for ins in inserts:
+                            statement = ins["insert_statement"]
+                            grouped_values.setdefault(statement, []).append(ins["values"])
+                        for statement, values_list in grouped_values.items():
+                            write_cursor.executemany(statement, values_list)
 
-                        # TODO: Re-enable HubSpot timeline writes after droplet
-                        # pipeline is validated in production.
-                        time.sleep(0.25)  # simulate HubSpot API latency
-                        # hubspot_event = ins.get("hubspot_event")
-                        # if hubspot_api_client and hubspot_event:
-                        #     hubspot_api_client.crm.timeline.events_api.create(
-                        #         timeline_event=hubspot_event
-                        #     )
-                    except Exception as e:
-                        print(
-                            f"Error inserting submission run={run_number} user_id={item.get('user_id')} prospect_id={item.get('prospect_id')}: {e}",
-                            flush=True,
-                        )
-
-                if update_statement:
-                    try:
+                    if update_statement:
                         write_cursor.execute(update_statement, update_values)
-                        write_conn.commit()
-                    except Exception as e:
-                        print(
-                            f"Error updating prospect profile run={run_number} user_id={item.get('user_id')} prospect_id={item.get('prospect_id')}: {e}",
-                            flush=True,
-                        )
+
+                    write_conn.commit()
+                except Exception as batch_err:
+                    # Fallback to row-by-row writes to isolate bad rows.
+                    write_conn.rollback()
+                    print(
+                        f"Batch write failed run={run_number} user_id={item.get('user_id')} prospect_id={item.get('prospect_id')}: {batch_err}",
+                        flush=True,
+                    )
+
+                    for ins in inserts:
+                        try:
+                            write_cursor.execute(ins["insert_statement"], ins["values"])
+                            write_conn.commit()
+                        except Exception as e:
+                            write_conn.rollback()
+                            print(
+                                f"Error inserting submission run={run_number} user_id={item.get('user_id')} prospect_id={item.get('prospect_id')}: {e}",
+                                flush=True,
+                            )
+
+                    if update_statement:
+                        try:
+                            write_cursor.execute(update_statement, update_values)
+                            write_conn.commit()
+                        except Exception as e:
+                            write_conn.rollback()
+                            print(
+                                f"Error updating prospect profile run={run_number} user_id={item.get('user_id')} prospect_id={item.get('prospect_id')}: {e}",
+                                flush=True,
+                            )
         finally:
             try:
                 write_cursor.close()
@@ -244,14 +251,12 @@ def main():
         user_id,
         cookie,
         token,
-        hubspot_api_client,
         max_number_of_regenerated_AI_responses,
     ):
         """Scrape a single prospect; returns dict for writer, None, or 'invalid_cookie'."""
         prospect_id_local = prospect_row[0]
         prospects_profile_url_local = prospect_row[1]
-        prospects_email_local = prospect_row[2]
-        monitoring_local = prospect_row[3]
+        monitoring_local = prospect_row[2]
 
         print(
             f"[run={run_number}] user_id={user_id} prospect_id={prospect_id_local} prospects_profile_url={prospects_profile_url_local}",
@@ -323,7 +328,6 @@ def main():
                 if post_date <= now - timedelta(days=8):
                     continue
 
-                ai_response = ""
                 resp1 = deepseekAI(post_content)
                 try:
                     print(
@@ -368,22 +372,10 @@ def main():
                     VALUES ({placeholders})
                 """
 
-                hubspot_event = None
-                if hubspot_api_client and prospects_email_local:
-                    hubspot_event = {
-                        "eventTemplateId": 1210728,
-                        "email": prospects_email_local,
-                        "tokens": {
-                            "linkedin_post_url": post_url,
-                            "suggested_comment": ai_response,
-                        },
-                    }
-
                 inserts.append(
                     {
                         "insert_statement": insert_statement,
                         "values": values,
-                        "hubspot_event": hubspot_event,
                     }
                 )
                 existing_submission_links.add(post_url)
@@ -441,7 +433,6 @@ def main():
                 "inserts": inserts,
                 "update_statement": update_statement,
                 "update_values": update_values,
-                "hubspot_api_client": hubspot_api_client,
             }
         except Exception as e:
             print(
@@ -453,9 +444,7 @@ def main():
     def user_worker(user):
         user_id = user[0]
         cookie = user[1]
-        hubspot_account_id = user[2]
-        hubspot_refresh_token = user[3]
-        max_number_of_regenerated_AI_responses = user[4]
+        max_number_of_regenerated_AI_responses = user[2]
 
         try:
             print(f"[run={run_number}] user_id={user_id} start", flush=True)
@@ -482,7 +471,6 @@ def main():
                 SELECT
                     id,
                     prospects_profile_url,
-                    email,
                     monitoring
                 FROM podserver_prospectsprofile
                 WHERE member_id = %s
@@ -493,39 +481,12 @@ def main():
             )
             prospects = read_cursor.fetchall()
 
-            hubspot_api_client = None
-            if (
-                hubspot_account_id
-                and hubspot_refresh_token
-                and hubspot_client_id
-                and hubspot_client_secret
-            ):
-                try:
-                    hubspot_api_client = HubSpot(access_token="bootstrap")
-                    tokens_response = (
-                        hubspot_api_client.auth.oauth.tokens_api.create_token(
-                            grant_type="refresh_token",
-                            refresh_token=hubspot_refresh_token,
-                            client_id=hubspot_client_id,
-                            client_secret=hubspot_client_secret,
-                        )
-                    )
-                    hubspot_api_client.access_token = tokens_response.access_token
-                except Exception as hubspot_auth_err:
-                    print(
-                        "HubSpot token refresh failed:",
-                        hubspot_auth_err,
-                        flush=True,
-                    )
-                    hubspot_api_client = None
-
             for prospect_row in prospects:
                 out = process_one_prospect(
                     prospect_row,
                     user_id=user_id,
                     cookie=cookie,
                     token=token,
-                    hubspot_api_client=hubspot_api_client,
                     max_number_of_regenerated_AI_responses=max_number_of_regenerated_AI_responses,
                 )
                 if out == "invalid_cookie":

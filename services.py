@@ -72,7 +72,23 @@ def _linkedin_get_json_with_retries(url, headers, context, max_attempts=3):
         try:
             return json.loads(response.text), response.status_code
         except json.JSONDecodeError:
-            body_preview = (response.text or "").strip().replace("\n", " ")[:80]
+            body_text = (response.text or "").strip()
+            body_preview = body_text.replace("\n", " ")[:80]
+            body_text_lower = body_text.lower()
+
+            # Auth/session failures are not transient; fail fast instead of retrying.
+            if response.status_code in (401, 403) and (
+                "csrf check failed" in body_text_lower
+                or "login required" in body_text_lower
+            ):
+                print(
+                    f"linkedin_failed context={context} reason=auth_session_invalid "
+                    f"status={response.status_code} attempt={attempt}/{max_attempts} "
+                    f"body_preview={body_preview!r}",
+                    flush=True,
+                )
+                return None, response.status_code
+
             print(
                 f"linkedin_retry context={context} reason=json_decode "
                 f"status={response.status_code} attempt={attempt}/{max_attempts} "
