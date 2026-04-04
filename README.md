@@ -101,7 +101,7 @@ doctl compute droplet create scraper-1 \
   --ssh-keys <your-key-id>
 ```
 
-After the droplet boots: **SSH in**, edit `/opt/engageai-scraper/.env` with real values (the bootstrap only creates a placeholder), then rebuild if needed: `docker build -t engageai-scraper /opt/engageai-scraper`. Add the droplet’s IP to **Managed Database → Trusted sources**.
+After the droplet boots: **SSH in**, edit `/opt/engageai-scraper/.env` with real values (the bootstrap only creates a placeholder) and keep it restricted with `chmod 600 /opt/engageai-scraper/.env`, then rebuild if needed: `docker build -t engageai-scraper /opt/engageai-scraper`. Add the droplet’s IP to **Managed Database → Trusted sources**.
 
 **Logs:** `tail -f /var/log/engageai-scraper.log`
 
@@ -114,9 +114,13 @@ Private Git repos need a [deploy key](https://docs.github.com/en/authentication/
 3. On the droplet:
 
 ```bash
-git clone <your-repo> /opt/engageai-scraper && cd /opt/engageai-scraper
+git clone https://<TOKEN>@github.com/filtpod/engageai-scraper.git /opt/engageai-scraper
+touch /opt/engageai-scraper/.env
+chmod 600 /opt/engageai-scraper/.env
+vim /opt/engageai-scraper/.env
+cd /opt/engageai-scraper
 docker build -t engageai-scraper .
-# Put secrets in /opt/engageai-scraper/.env (see above)
+# Create and lock down env file, then add secrets (see above)
 ```
 
 4. **Cron** (overlap is prevented by the lock file); match what `do-app.yaml` installs:
