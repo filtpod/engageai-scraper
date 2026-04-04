@@ -1,95 +1,41 @@
-# DigitalOcean App Platform spec for the LinkedIn scraper job.
-# This defines a separate App Platform app with a single scheduled Job
-# component that runs the scraper container on a cron schedule.
-#
-# Deploy:
-#   doctl apps create --spec scraper/do-app.yaml
-#
-# After creating the app:
-#   1. Set all environment variable values in the App control panel
-#      (Apps > this app > Settings > prospect-scraper > Environment variables).
-#   2. Add this App as a trusted source on your Managed Database
-#      (Database > Settings > Trusted sources > Quick select > Apps).
-#
-# Notes:
-# - The schedule below runs every 12 hours: "0 */12 * * *".
+#cloud-config
+# Droplet user data (not App Platform). See README: Droplet cloud-init (do-app.yaml).
 
-name: engageai-scraper-job
-region: syd
+package_update: true
+package_upgrade: true
 
-jobs:
-  - name: prospect-scraper
-    kind: SCHEDULED
-    schedule:
-      cron: "*/15 * * *"
-      time_zone: Australia/Sydney
+packages:
+  - docker.io
+  - git
 
-    # Build from this repo using the Dockerfile in the scraper/ directory.
-    github:
-      # Update to your actual owner/repo if different.
-      repo: TeamEAI/engageai-functions
-      branch: main
-      deploy_on_push: true
-    source_dir: scraper
-    dockerfile_path: scraper/Dockerfile
+write_files:
+  - path: /etc/cron.d/engageai-scraper
+    permissions: "0644"
+    content: |
+      SHELL=/bin/bash
+      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      CRON_TZ=UTC
+      # Premium-only run 6 days/week (Mon-Sat) at 00:00 UTC.
+      0 0 * * 1-6 root docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=premium_only engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+      # Full run on the 7th day (Sunday) at 00:00 UTC.
+      0 0 * * 0 root docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=all engageai-scraper >> /var/log/engageai-scraper.log 2>&1
 
-    instance_size_slug: apps-s-1vcpu-0.5gb
-    instance_count: 1
-
-    envs:
-      # Database connection (DigitalOcean Managed MySQL)
-      - key: DB_HOST
-        scope: RUN_TIME
-        type: GENERAL
-      - key: DB_PORT
-        scope: RUN_TIME
-        type: GENERAL
-      - key: DB_NAME
-        scope: RUN_TIME
-        type: GENERAL
-      - key: DB_USER
-        scope: RUN_TIME
-        type: GENERAL
-      - key: DB_PASSWORD
-        scope: RUN_TIME
-        type: SECRET
-
-      # Azure OpenAI
-      - key: AZUREAI_API_KEY
-        scope: RUN_TIME
-        type: SECRET
-      - key: AZUREAI_ENDPOINT
-        scope: RUN_TIME
-        type: GENERAL
-      - key: AZUREAI_DEPLOYMENT
-        scope: RUN_TIME
-        type: GENERAL
-
-      # DeepSeek
-      - key: DEEPSEEK_API_KEY
-        scope: RUN_TIME
-        type: SECRET
-
-      # HubSpot OAuth app (used when sending timeline events)
-      - key: HUBSPOT_CLIENT_ID
-        scope: RUN_TIME
-        type: SECRET
-      - key: HUBSPOT_CLIENT_SECRET
-        scope: RUN_TIME
-        type: SECRET
-
-      # Postmark server token for admin notification email
-      - key: POSTMARK_SERVER_TOKEN
-        scope: RUN_TIME
-        type: SECRET
-
-      # Admin email for notifications (default is hello@engage-ai.co if unset)
-      - key: ADMIN_EMAIL
-        scope: RUN_TIME
-        type: GENERAL
-
-      # Scrape-it API key (if using scrap_it fallback)
-      - key: SCRAPE_IT_API_KEY
-        scope: RUN_TIME
-        type: SECRET
-
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - |
+    set -euo pipefail
+    REPO="https://github.com/TeamEAI/engageai-scraper.git"
+    mkdir -p /opt/engageai-scraper
+    if [ ! -d /opt/engageai-scraper/.git ]; then
+      git clone --depth 1 --branch main "$REPO" /opt/engageai-scraper
+    fi
+    docker build -t engageai-scraper /opt/engageai-scraper
+    if [ ! -f /opt/engageai-scraper/.env ]; then
+      umask 077
+      printf '%s\n' \
+        '# Paste secrets here (see README). Required: DB_*, DEEPSEEK_API_KEY, etc.' \
+        > /opt/engageai-scraper/.env
+      chmod 600 /opt/engageai-scraper/.env
+    fi
+    touch /var/log/engageai-scraper.log
+    chmod 644 /var/log/engageai-scraper.log

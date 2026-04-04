@@ -133,22 +133,41 @@ def main():
     # Parallel users (each with its own LinkedIn cookie); prospects per user are sequential.
     max_workers = max(1, int(os.environ.get("SCRAPE_MAX_WORKERS", "32")))
     write_queue_size = max(1, int(os.environ.get("SCRAPE_WRITE_QUEUE_SIZE", "200")))
+    group_filter = os.environ.get("SCRAPE_GROUP_FILTER", "all").strip().lower() or "all"
+    groups_by_filter = {
+        "all": ("Member", "Growth Plan", "Trial", "Premium", "Starter"),
+        "premium_only": ("Premium",),
+        "non_premium_only": ("Member", "Growth Plan", "Trial", "Starter"),
+    }
+    if group_filter not in groups_by_filter:
+        print(
+            f"Unknown SCRAPE_GROUP_FILTER={group_filter!r}; falling back to 'all'.",
+            flush=True,
+        )
+        group_filter = "all"
+    selected_groups = groups_by_filter[group_filter]
+    print(
+        f"Using SCRAPE_GROUP_FILTER={group_filter} groups={selected_groups}",
+        flush=True,
+    )
 
     conn = get_db_connection(verbose=True)
     cursor = conn.cursor()
+    group_placeholders = ", ".join(["%s"] * len(selected_groups))
 
     cursor.execute(
-        """
+        f"""
         SELECT
             id,
             linkedin_cookie,
             max_number_of_regenerated_AI_responses
         FROM podserver_customuser
-        WHERE `group` IN ('Member', 'Growth Plan', 'Trial', 'Premium', 'Starter')
+        WHERE `group` IN ({group_placeholders})
           AND linkedin_cookie != ''
           AND linkedin_cookie IS NOT NULL
         ORDER BY last_login DESC
         """,
+        tuple(selected_groups),
     )
 
     users = cursor.fetchall()

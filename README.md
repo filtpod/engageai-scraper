@@ -55,6 +55,12 @@ User work is **batched** when submitting to the pool so tens of thousands of `Fu
 
 **Optional:** `SCRAPE_RUN_NUMBER` for log correlation.
 
+**Group filter per run (for split schedules):**
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SCRAPE_GROUP_FILTER` | `all` | User group selector for this run. Use `premium_only` for Premium users, `non_premium_only` for Member/Growth Plan/Trial/Starter, or `all` for all groups. |
+
 Example `.env`:
 
 ```env
@@ -71,6 +77,7 @@ ADMIN_EMAIL=hello@engage-ai.co
 
 SCRAPE_MAX_WORKERS=32
 SCRAPE_WRITE_QUEUE_SIZE=200
+SCRAPE_GROUP_FILTER=all
 ```
 
 ## Deploy on a DigitalOcean Droplet (recommended)
@@ -115,10 +122,19 @@ docker build -t engageai-scraper .
 4. **Cron** (overlap is prevented by the lock file); match what `do-app.yaml` installs:
 
 ```cron
-0 */12 * * * docker run --rm --env-file /opt/engageai-scraper/.env engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+CRON_TZ=UTC
+# Premium-only run 6 days/week (Mon-Sat) at 00:00 UTC
+0 0 * * 1-6 docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=premium_only engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+
+# Full run on the 7th day (Sunday) at 00:00 UTC
+0 0 * * 0 docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=all engageai-scraper >> /var/log/engageai-scraper.log 2>&1
 ```
 
 5. **Logs:** `tail -f /var/log/engageai-scraper.log` or your log shipper.
+
+**Timezone note:** The examples set `CRON_TZ=UTC`, so schedule times are interpreted in UTC even if the server timezone is Australia/Sydney.
+
+**Migration for existing droplets:** If your droplet already exists, update `/etc/cron.d/engageai-scraper` manually (or re-apply cloud-init content) because changing `do-app.yaml` alone does not update an already-provisioned machine.
 
 **Tuning:** If LinkedIn or DeepSeek throttles, lower `SCRAPE_MAX_WORKERS`. If the writer falls behind (queue full / workers block), raise `SCRAPE_WRITE_QUEUE_SIZE` slightly or check DB latency.
 
