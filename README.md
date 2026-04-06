@@ -39,12 +39,14 @@ User work is **batched** when submitting to the pool so tens of thousands of `Fu
 - **Postmark**: `POSTMARK_SERVER_TOKEN`, optional `ADMIN_EMAIL`
 - **Scrape-it** (optional helper in `services.py`): `SCRAPE_IT_API_KEY`
 
-**Parallelism (defaults tuned for a 4 GB droplet):**
+**Parallelism:**
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `SCRAPE_MAX_WORKERS` | `32` | Concurrent **users** (each user’s prospects run sequentially). |
+| `SCRAPE_MAX_WORKERS` | `16` | Concurrent **users** (each user’s prospects run sequentially). |
 | `SCRAPE_WRITE_QUEUE_SIZE` | `200` | Max queued write batches before workers block. |
+
+**Database connections (MySQL):** Each concurrent user worker holds **one** read connection while processing that user; the writer uses **one** more. Rough peak is about **`SCRAPE_MAX_WORKERS + 1`** connections from this job. Keep that under your managed DB `max_connections` minus whatever your app and admin tools need (for example, if `max_connections` is 76, avoid setting workers above ~24–32 unless you have confirmed headroom). Worker threads **close their read connection after each user** so idle threads do not hold connections. A hard kill (`docker kill` / SIGKILL) can still leave sessions until MySQL `wait_timeout`—prefer graceful stops when possible.
 
 **Lock file (overlapping cron runs):**
 
@@ -75,14 +77,14 @@ DEEPSEEK_API_KEY=your_deepseek_key
 POSTMARK_SERVER_TOKEN=your_postmark_server_token
 ADMIN_EMAIL=hello@engage-ai.co
 
-SCRAPE_MAX_WORKERS=32
+SCRAPE_MAX_WORKERS=16
 SCRAPE_WRITE_QUEUE_SIZE=200
 SCRAPE_GROUP_FILTER=all
 ```
 
 ## Deploy on a DigitalOcean Droplet (recommended)
 
-**Droplet size:** start with **`s-2vcpu-4gb`** (Sydney or your DB region). Workload is I/O-bound; 2 vCPUs and 4 GB RAM are enough for ~32 concurrent user workers. Increase `SCRAPE_MAX_WORKERS` only if memory stays comfortable and APIs/DB allow it.
+**Droplet size:** start with **`s-2vcpu-4gb`** (Sydney or your DB region). Workload is I/O-bound; 2 vCPUs and 4 GB RAM are typically enough for the default **16** concurrent user workers. Increase `SCRAPE_MAX_WORKERS` only if memory stays comfortable and APIs/DB `max_connections` allow it.
 
 ### Droplet cloud-init (`do-app.yaml`)
 
