@@ -131,7 +131,8 @@ def main():
     print(f"Scraper job starting (run={run_number})...", flush=True)
 
     # Parallel users (each with its own LinkedIn cookie); prospects per user are sequential.
-    max_workers = max(1, int(os.environ.get("SCRAPE_MAX_WORKERS", "32")))
+    # Default is conservative for shared MySQL max_connections (~workers + 1 connections per run).
+    max_workers = max(1, int(os.environ.get("SCRAPE_MAX_WORKERS", "8")))
     write_queue_size = max(1, int(os.environ.get("SCRAPE_WRITE_QUEUE_SIZE", "200")))
     group_filter = os.environ.get("SCRAPE_GROUP_FILTER", "all").strip().lower() or "all"
     groups_by_filter = {
@@ -194,6 +195,28 @@ def main():
         with read_conns_lock:
             read_conns.append(read_conn)
         return read_cursor
+
+    def release_thread_read_connection():
+        """Close this worker thread's read cursor/connection; frees a MySQL slot between users."""
+        read_cursor = getattr(worker_local, "cursor", None)
+        read_conn = getattr(worker_local, "conn", None)
+        if read_cursor is not None:
+            try:
+                read_cursor.close()
+            except Exception:
+                pass
+            worker_local.cursor = None
+        if read_conn is not None:
+            try:
+                read_conn.close()
+            except Exception:
+                pass
+            worker_local.conn = None
+            with read_conns_lock:
+                try:
+                    read_conns.remove(read_conn)
+                except ValueError:
+                    pass
 
     def writer_loop():
         write_conn = get_db_connection(verbose=False)
@@ -523,6 +546,8 @@ def main():
                 f"Top-level user_worker error run={run_number} user_id={user_id}: {e}",
                 flush=True,
             )
+        finally:
+            release_thread_read_connection()
 
     # Batch users so we do not submit tens of thousands of futures at once.
     user_batch_size = max(128, max_workers * 4)
@@ -536,11 +561,13 @@ def main():
         write_queue.put(None)
         writer_thread.join()
 
-        for c in read_conns:
+        # Any connections not released in user_worker finally (e.g. hard crash).
+        for c in list(read_conns):
             try:
                 c.close()
             except Exception:
                 pass
+        read_conns.clear()
 
     # Notify admin that the scraping job finished.
     try:
