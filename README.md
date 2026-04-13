@@ -43,10 +43,10 @@ User work is **batched** when submitting to the pool so tens of thousands of `Fu
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `SCRAPE_MAX_WORKERS` | `16` | Concurrent **users** (each user’s prospects run sequentially). |
+| `SCRAPE_MAX_WORKERS` | `2` | Concurrent **users** (each user’s prospects run sequentially). |
 | `SCRAPE_WRITE_QUEUE_SIZE` | `200` | Max queued write batches before workers block. |
 
-**Database connections (MySQL):** Each concurrent user worker holds **one** read connection while processing that user; the writer uses **one** more. Rough peak is about **`SCRAPE_MAX_WORKERS + 1`** connections from this job. Keep that under your managed DB `max_connections` minus whatever your app and admin tools need (for example, if `max_connections` is 76, avoid setting workers above ~24–32 unless you have confirmed headroom). Worker threads **close their read connection after each user** so idle threads do not hold connections. A hard kill (`docker kill` / SIGKILL) can still leave sessions until MySQL `wait_timeout`—prefer graceful stops when possible.
+**Database connections (MySQL):** Each concurrent user worker holds **one** read connection while processing that user; the writer uses **one** more. Rough peak is about **`SCRAPE_MAX_WORKERS + 1`** connections from this job. Keep that under your managed DB `max_connections` minus whatever your app and admin tools need. If you raise workers toward the high end (for example, if `max_connections` is 76, only push into the ~24–32 worker range after confirming headroom). Worker threads **close their read connection after each user** so idle threads do not hold connections. A hard kill (`docker kill` / SIGKILL) can still leave sessions until MySQL `wait_timeout`—prefer graceful stops when possible.
 
 **Lock file (overlapping cron runs):**
 
@@ -54,6 +54,8 @@ User work is **batched** when submitting to the pool so tens of thousands of `Fu
 |----------|---------|---------|
 | `SCRAPE_LOCK_FILE` | `/tmp/scraper.lock` | PID file; second run exits if the first is still alive. |
 | `SCRAPE_LOCK_DISABLED` | unset | Set to `1` / `true` / `yes` to disable the lock (e.g. local dev). |
+
+On a single droplet with the lock enabled, **only one `scrape.py` process** runs at a time; MySQL connection count still scales with **`SCRAPE_MAX_WORKERS`** inside that process (read workers plus the writer), not with “how many droplets.”
 
 **Optional:** `SCRAPE_RUN_NUMBER` for log correlation.
 
@@ -77,14 +79,15 @@ DEEPSEEK_API_KEY=your_deepseek_key
 POSTMARK_SERVER_TOKEN=your_postmark_server_token
 ADMIN_EMAIL=hello@engage-ai.co
 
-SCRAPE_MAX_WORKERS=16
+# Optional: default SCRAPE_MAX_WORKERS=2; raise only if DB max_connections and APIs allow
+SCRAPE_MAX_WORKERS=2
 SCRAPE_WRITE_QUEUE_SIZE=200
 SCRAPE_GROUP_FILTER=all
 ```
 
 ## Deploy on a DigitalOcean Droplet (recommended)
 
-**Droplet size:** start with **`s-2vcpu-4gb`** (Sydney or your DB region). Workload is I/O-bound; 2 vCPUs and 4 GB RAM are typically enough for the default **16** concurrent user workers. Increase `SCRAPE_MAX_WORKERS` only if memory stays comfortable and APIs/DB `max_connections` allow it.
+**Droplet size:** start with **`s-2vcpu-4gb`** (Sydney or your DB region). Workload is I/O-bound; 2 vCPUs and 4 GB RAM are typically enough for the default **2** concurrent user workers. Increase `SCRAPE_MAX_WORKERS` only after validating memory, API limits, and DB `max_connections` headroom.
 
 ### Droplet cloud-init (`do-app.yaml`)
 

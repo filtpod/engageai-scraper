@@ -131,8 +131,10 @@ def main():
     print(f"Scraper job starting (run={run_number})...", flush=True)
 
     # Parallel users (each with its own LinkedIn cookie); prospects per user are sequential.
-    # Default is conservative for shared MySQL max_connections (~workers + 1 connections per run).
-    max_workers = max(1, int(os.environ.get("SCRAPE_MAX_WORKERS", "8")))
+    # Peak MySQL sessions from this job ≈ SCRAPE_MAX_WORKERS + 1 (writer) plus one short-lived
+    # connection while loading eligible users. Default 2 is conservative for small/shared MySQL
+    # tiers; raise only when APIs, memory, and DB max_connections headroom allow it.
+    max_workers = max(1, int(os.environ.get("SCRAPE_MAX_WORKERS", "2")))
     write_queue_size = max(1, int(os.environ.get("SCRAPE_WRITE_QUEUE_SIZE", "200")))
     group_filter = os.environ.get("SCRAPE_GROUP_FILTER", "all").strip().lower() or "all"
     groups_by_filter = {
