@@ -19,11 +19,16 @@ write_files:
       0 0 * * 1-6 root docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=premium_only engageai-scraper >> /var/log/engageai-scraper.log 2>&1
       # Full run on the 7th day (Sunday) at 00:00 UTC.
       0 0 * * 0 root docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=all engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+      # LinkedIn notifications (reactions, comments, profile views) — daily at 08:00 UTC.
+      0 8 * * * root docker run --rm --env-file /opt/engageai-scraper/.env engageai-scraper python scrape_notifications.py >> /var/log/engageai-notifications.log 2>&1
+      # Prospect profile details backfill (missing photos) — daily at 16:00 UTC.
+      0 16 * * * root docker run --rm --env-file /opt/engageai-scraper/.env engageai-scraper python scrape_prospects_details.py >> /var/log/engageai-prospects-details.log 2>&1
 
 runcmd:
   - [systemctl, enable, --now, docker]
+  # cloud-init runs multiline runcmd with /bin/sh (dash); pipefail is bash-only.
   - |
-    set -euo pipefail
+    set -eu
     REPO="https://github.com/TeamEAI/engageai-scraper.git"
     mkdir -p /opt/engageai-scraper
     if [ ! -d /opt/engageai-scraper/.git ]; then

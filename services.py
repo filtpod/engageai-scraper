@@ -422,6 +422,7 @@ def get_profile_details(profile_name, cookie, token, is_company):
                     if "name" in item:
                         first_name = item["name"]
         else:
+            has_profile_picture_field = False
             for item in data:
                 if "headline" in item:
                     if (
@@ -436,13 +437,18 @@ def get_profile_details(profile_name, cookie, token, is_company):
                 if "multiLocaleLastName" in item:
                     last_name = item["multiLocaleLastName"][0]["value"]
                 if "profilePicture" in item:
+                    has_profile_picture_field = True
                     root = item["profilePicture"]["displayImageReferenceResolutionResult"]
-                    if root is not None:
+                    if root is None:
+                        print(f"profile_photo missing profile={profile_name} reason=displayImageReferenceResolutionResult_is_null", flush=True)
+                    else:
                         root_url = root["vectorImage"]["rootUrl"]
                         file_identifying_url = root["vectorImage"]["artifacts"][0][
                             "fileIdentifyingUrlPathSegment"
                         ]
                         profile_photo_url = root_url + file_identifying_url
+            if not has_profile_picture_field:
+                print(f"profile_photo missing profile={profile_name} reason=profilePicture_field_absent_from_response", flush=True)
 
         return {
             "first_name": first_name,
@@ -539,6 +545,208 @@ def remove_emojis(text):
         flags=re.UNICODE,
     )
     return emoji_pattern.sub(r"", text)
+
+
+def get_date2(date_string):
+    now = datetime.now()
+    number = int(re.search(r"\d+", date_string).group())
+    pattern = r"\d([a-zA-Z])"
+    match = re.search(pattern, date_string)
+    if match:
+        t = match.group(1)
+    else:
+        return now
+    if t == "m":
+        return now - timedelta(minutes=number)
+    elif t == "h":
+        return now - timedelta(hours=number)
+    elif t == "d":
+        return now - timedelta(days=number)
+    return now
+
+
+def get_notifications(cookie, token):
+    try:
+        headers = {
+            "accept": "application/vnd.linkedin.normalized+json+2.1",
+            "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+            "Cookie": cookie,
+            "Csrf-token": token,
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "x-li-lang": "en_US",
+            "x-li-track": '{"clientVersion":"","mpVersion":"","osName":"web","timezoneOffset":-4,"mpName":"voyager-web","displayDensity":2,"displayWidth":2880,"displayHeight":1800}',
+            "x-restli-protocol-version": "2.0.0",
+        }
+        url = "https://www.linkedin.com/voyager/api/voyagerIdentityDashNotificationCards?decorationId=com.linkedin.voyager.dash.deco.identity.notifications.CardsCollectionWithInjectionsNoPills-23&count=100&filterUrn=urn%3Ali%3Afsd_notificationFilter%3AALL&q=notifications"
+        response, _ = _linkedin_get_json_with_retries(url, headers, context="notifications")
+        if response is None:
+            return {"status": 400, "data": [], "message": "request failed"}
+        data = []
+        if "included" in response:
+            for item in response["included"]:
+                if "cardAction" in item:
+                    post_link = "https://www.linkedin.com" + item["cardAction"]["actionTarget"]
+                else:
+                    continue
+                notification_headline = item.get("headline", {}).get("text") if "headline" in item else None
+                if notification_headline is None:
+                    continue
+                if "commented on your post" in notification_headline:
+                    reaction_type = "Comment"
+                elif "reacted to your post" in notification_headline:
+                    reaction_type = "Reaction"
+                elif "mentioned you" in notification_headline or "replied to your comment" in notification_headline:
+                    reaction_type = "Mention"
+                elif "found your comment" in notification_headline or "liked your comment" in notification_headline or "loved your comment" in notification_headline:
+                    reaction_type = "Comment Reaction"
+                else:
+                    continue
+                prospects_profile_url = None
+                prospects_profile_url_id = None
+                view_profile_text = None
+                if "headerImage" in item:
+                    if "actionTarget" in item["headerImage"]:
+                        prospects_profile_url = "https://www.linkedin.com" + item["headerImage"]["actionTarget"]
+                        prospects_profile_url = prospects_profile_url.replace("%2D", "-")
+                        if prospects_profile_url and prospects_profile_url[-1] != "/":
+                            prospects_profile_url = prospects_profile_url + "/"
+                    try:
+                        profile_id = item["headerImage"]["attributes"][0]["detailData"]["*profilePicture"]
+                        match = re.search(r"(?<=urn:li:fsd_profile:)[\w-]+", profile_id)
+                        if match:
+                            prospects_profile_url_id = match.group()
+                    except (KeyError, TypeError):
+                        pass
+                    view_profile_text = item["headerImage"].get("accessibilityText")
+                timestamp = item.get("publishedAt")
+                data.append({
+                    "timestamp": timestamp,
+                    "prospects_profile_url": prospects_profile_url,
+                    "prospects_profile_url_id": prospects_profile_url_id,
+                    "view_profile_text": view_profile_text,
+                    "notification_headline": notification_headline,
+                    "reaction_type": reaction_type,
+                    "post_link": post_link,
+                })
+        return {"status": 200, "data": data, "message": "Success"}
+    except Exception as e:
+        print("Error", e)
+        return {"status": 400, "data": [], "message": str(e)}
+
+
+def get_profile_viewers(cookie, token, start_count=0):
+    try:
+        headers = {
+            "accept": "application/vnd.linkedin.normalized+json+2.1",
+            "accept-language": "en-GB,en-US;q=0.9,en;q=0.8",
+            "Cookie": cookie,
+            "Csrf-token": token,
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "x-li-lang": "en_US",
+            "x-li-track": '{"clientVersion":"","mpVersion":"","osName":"web","timezoneOffset":-4,"mpName":"voyager-web","displayDensity":2,"displayWidth":2880,"displayHeight":1800}',
+            "x-restli-protocol-version": "2.0.0",
+        }
+        url = "https://www.linkedin.com/voyager/api/graphql?variables=(edgeInsightsAnalyticsCardUrns:List(urn%3Ali%3Afsd_edgeInsightsAnalyticsCard%3A%28WVMP%2Curn%3Ali%3Awvmp%3A1%2CANALYTICS%2CSUMMARY%2CBROWSE_FOR_FREE_VIEWERS%29),query:())&queryId=voyagerPremiumDashAnalyticsCard.cfe9023054e958b103231002a2e60a67"
+        response, _ = _linkedin_get_json_with_retries(url, headers, context=f"profile_viewers:start={start_count}")
+        if response is None:
+            return {"status": 400, "data": [], "message": "request failed"}
+
+        viewers = []
+        viewers1 = []
+
+        if "included" in response and len(response["included"]) > 0:
+            for d in response["included"]:
+                if "component" in d:
+                    for item in (d["component"].get("analyticsObjectList") or {}).get("items") or []:
+                        nav_url = item["content"]["analyticsEntityLockup"]["entityLockup"]["navigationUrl"]
+                        match = re.search(r"linkedin\.com/in/([a-zA-Z0-9_-]+)", nav_url)
+                        if not match:
+                            continue
+                        viewed_text = item["content"]["analyticsEntityLockup"]["entityLockup"]["caption"]["text"]
+                        name = item["content"]["analyticsEntityLockup"]["entityLockup"]["title"]["text"]
+                        viewers.append({
+                            "post_link": "https://www.linkedin.com/analytics/profile-views",
+                            "prospects_name": name,
+                            "prospects_profile_id": match.group(1),
+                            "notification_type": "Profile View",
+                            "date": get_date2(viewed_text),
+                        })
+                elif "publicIdentifier" in d:
+                    try:
+                        entityUrn = d["entityUrn"]
+                        publicIdentifier = d["publicIdentifier"]
+                        root_url = d["profilePicture"]["displayImageReferenceResolutionResult"]["vectorImage"]["rootUrl"]
+                        segment = d["profilePicture"]["displayImageReferenceResolutionResult"]["vectorImage"]["artifacts"][0]["fileIdentifyingUrlPathSegment"]
+                        match = re.search(r"fsd_profile:(.*)", entityUrn)
+                        if match:
+                            viewers1.append({
+                                "profile_photo": root_url + segment,
+                                "prospects_profile_id": match.group(1),
+                                "prospects_profile_url": "https://www.linkedin.com/in/" + publicIdentifier + "/",
+                            })
+                    except (KeyError, TypeError):
+                        pass
+        else:
+            url2 = (
+                f"https://www.linkedin.com/voyager/api/graphql?variables=(paginationToken:null,start:{start_count},"
+                "query:(),analyticsEntityUrn:(activityUrn:urn%3Ali%3Adummy%3A-1),surfaceType:WVMP)"
+                "&queryId=voyagerPremiumDashAnalyticsObject.aa8a7968626fe44b2b5c7234c6a19e8e"
+            )
+            response2, _ = _linkedin_get_json_with_retries(url2, headers, context=f"profile_viewers_fallback:start={start_count}")
+            if response2 is not None:
+                if "data" in response2:
+                    elements = response2["data"]["data"]["premiumDashAnalyticsObjectByAnalyticsEntity"]["elements"]
+                    for d in elements:
+                        if "content" not in d:
+                            continue
+                        nav_url = d["content"]["analyticsEntityLockup"]["entityLockup"]["navigationUrl"]
+                        if not nav_url:
+                            continue
+                        match = re.search(r"linkedin\.com/in/([a-zA-Z0-9_-]+)", nav_url)
+                        if not match:
+                            continue
+                        viewed_text = d["content"]["analyticsEntityLockup"]["entityLockup"]["caption"]["text"]
+                        name = d["content"]["analyticsEntityLockup"]["entityLockup"]["title"]["text"]
+                        viewers.append({
+                            "post_link": "https://www.linkedin.com/analytics/profile-views",
+                            "prospects_name": name,
+                            "prospects_profile_id": match.group(1),
+                            "notification_type": "Profile View",
+                            "date": get_date2(viewed_text),
+                        })
+                if "included" in response2:
+                    for d in response2["included"]:
+                        if "publicIdentifier" not in d or "profilePicture" not in d:
+                            continue
+                        try:
+                            entityUrn = d["entityUrn"]
+                            publicIdentifier = d["publicIdentifier"]
+                            root_url = d["profilePicture"]["displayImageReferenceResolutionResult"]["vectorImage"]["rootUrl"]
+                            segment = d["profilePicture"]["displayImageReferenceResolutionResult"]["vectorImage"]["artifacts"][0]["fileIdentifyingUrlPathSegment"]
+                            match = re.search(r"fsd_profile:(.*)", entityUrn)
+                            if match:
+                                viewers1.append({
+                                    "profile_photo": root_url + segment,
+                                    "prospects_profile_id": match.group(1),
+                                    "prospects_profile_url": "https://www.linkedin.com/in/" + publicIdentifier + "/",
+                                })
+                        except (KeyError, TypeError):
+                            pass
+
+        lookup = {item["prospects_profile_id"]: item for item in viewers1}
+        combined = [
+            {**item, **lookup[item["prospects_profile_id"]]}
+            for item in viewers
+            if item["prospects_profile_id"] in lookup
+        ]
+        return {"status": 200, "data": combined, "message": "Success"}
+    except Exception as e:
+        print("Error", e)
+        return {"status": 400, "data": [], "message": str(e)}
 
 
 def admin_email():

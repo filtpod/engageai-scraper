@@ -15,6 +15,8 @@ from services import (
     get_recent_posts,
     admin_email,
     get_profile_details,
+    get_notifications,
+    get_profile_viewers,
     remove_emojis,
 )
 from openai_api import deepseekAI
@@ -485,6 +487,129 @@ def main():
             )
             return None
 
+    def process_user_notifications(user_id, cookie, token, read_cursor):
+        result = get_notifications(cookie, token)
+        if result["status"] != 200:
+            print(f"notifications failed user_id={user_id}, skipping profile viewers", flush=True)
+            return
+        for d in result["data"]:
+            read_cursor.execute(
+                "SELECT id FROM podserver_linkedinnotification "
+                "WHERE user_id = %s AND notification_type = %s AND post_link = %s LIMIT 1",
+                (user_id, d["reaction_type"], d["post_link"]),
+            )
+            if read_cursor.fetchone():
+                continue
+            try:
+                name_matches = re.findall(r'"?([^"]*)"?', d.get("view_profile_text") or "")
+                name = next((m for m in name_matches if m.strip()), "")
+            except TypeError:
+                name = ""
+            row = {
+                "user_id": user_id,
+                "post_link": d["post_link"],
+                "date": datetime.fromtimestamp(int(d["timestamp"] / 1000)),
+                "prospects_profile_url": d["prospects_profile_url"],
+                "prospects_profile_id": d["prospects_profile_url_id"],
+                "notification_text": d["view_profile_text"],
+                "prospects_name": name,
+                "notification_type": d["reaction_type"],
+            }
+            columns = ", ".join(row.keys())
+            placeholders = ", ".join(["%s"] * len(row))
+            write_queue.put({
+                "user_id": user_id,
+                "inserts": [{
+                    "insert_statement": f"INSERT INTO podserver_linkedinnotification ({columns}) VALUES ({placeholders})",
+                    "values": tuple(row.values()),
+                }],
+            })
+
+        for start in range(0, 101, 10):
+            viewers_result = get_profile_viewers(cookie, token, start)
+            if viewers_result["status"] != 200:
+                break
+            if not viewers_result["data"]:
+                break
+            for d in viewers_result["data"]:
+                read_cursor.execute(
+                    "SELECT id FROM podserver_linkedinnotification "
+                    "WHERE user_id = %s AND notification_type = %s "
+                    "AND (prospects_profile_url = %s OR prospects_profile_id = %s) LIMIT 1",
+                    (user_id, d["notification_type"], d.get("prospects_profile_url"), d.get("prospects_profile_id")),
+                )
+                if read_cursor.fetchone():
+                    continue
+                row = {**d, "user_id": user_id}
+                columns = ", ".join(row.keys())
+                placeholders = ", ".join(["%s"] * len(row))
+                write_queue.put({
+                    "user_id": user_id,
+                    "inserts": [{
+                        "insert_statement": f"INSERT INTO podserver_linkedinnotification ({columns}) VALUES ({placeholders})",
+                        "values": tuple(row.values()),
+                    }],
+                })
+
+    def process_missing_photos(user_id, cookie, token, read_cursor):
+        now_ts = int(now.timestamp())
+
+        def _photo_needs_refresh(photo_url):
+            if not photo_url:
+                return True
+            m = re.search(r"[?&]e=(\d+)", photo_url)
+            if m and int(m.group(1)) < now_ts:
+                return True
+            return False
+
+        read_cursor.execute(
+            "SELECT id, prospects_profile_url, profile_photo_url FROM podserver_prospectsprofile "
+            "WHERE member_id = %s ORDER BY date_added DESC LIMIT 200",
+            (user_id,),
+        )
+        prospects = read_cursor.fetchall()
+        for prospect in prospects:
+            prospect_id = prospect[0]
+            profile_url = prospect[1]
+            photo_url = prospect[2]
+            if not profile_url:
+                continue
+            if not _photo_needs_refresh(photo_url):
+                continue
+
+            match = re.search(r"((?<=in/)|(?<=company/)).*", profile_url)
+            if not match:
+                continue
+            profile_name = match.group(0).split("/")[0]
+            is_company = "company" in profile_url
+
+            result = get_profile_details(profile_name, cookie, token, is_company)
+            if not isinstance(result, dict):
+                continue
+            try:
+                first_name = result["first_name"]
+                if first_name is None:
+                    m = re.search(r"^[^?]+", profile_name)
+                    clean = m.group(0) if m else profile_name
+                    write_queue.put({
+                        "user_id": user_id,
+                        "prospect_id": prospect_id,
+                        "update_statement": "UPDATE podserver_prospectsprofile SET first_name=%s, last_name=%s, headline=%s WHERE id=%s",
+                        "update_values": (clean, "-", "", prospect_id),
+                    })
+                    continue
+                first_name = remove_emojis(first_name).replace('"', "").replace("'", "")
+                last_name = remove_emojis(result.get("last_name") or "").replace('"', "").replace("'", "")
+                headline = remove_emojis(result.get("headline") or "").replace('"', "")
+                write_queue.put({
+                    "user_id": user_id,
+                    "prospect_id": prospect_id,
+                    "update_statement": "UPDATE podserver_prospectsprofile SET first_name=%s, last_name=%s, headline=%s, profile_photo_url=%s WHERE id=%s",
+                    "update_values": (first_name, last_name, headline, result.get("profile_photo_url"), prospect_id),
+                })
+            except Exception as e:
+                print(f"process_missing_photos error user_id={user_id} prospect_id={prospect_id}: {e}", flush=True)
+
     def user_worker(user):
         user_id = user[0]
         cookie = user[1]
@@ -541,6 +666,16 @@ def main():
                     break
                 if out is not None:
                     write_queue.put(out)
+
+            try:
+                process_user_notifications(user_id, cookie, token, read_cursor)
+            except Exception as e:
+                print(f"process_user_notifications error run={run_number} user_id={user_id}: {e}", flush=True)
+
+            try:
+                process_missing_photos(user_id, cookie, token, read_cursor)
+            except Exception as e:
+                print(f"process_missing_photos error run={run_number} user_id={user_id}: {e}", flush=True)
 
             print(f"[run={run_number}] user_id={user_id} done", flush=True)
         except Exception as e:

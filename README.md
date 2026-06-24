@@ -145,6 +145,19 @@ CRON_TZ=UTC
 
 **Migration for existing droplets:** If your droplet already exists, update `/etc/cron.d/engageai-scraper` manually (or re-apply cloud-init content) because changing `do-app.yaml` alone does not update an already-provisioned machine.
 
+### Backup checklist (existing droplet or failed cloud-init)
+
+Use this when **`/opt/engageai-scraper` is already cloned** but you still need to finish setup (for example cloud-init stopped at `runcmd`, or you deployed manually).
+
+1. **Build the image:** `docker build -t engageai-scraper /opt/engageai-scraper`
+2. **Secrets:** Edit `/opt/engageai-scraper/.env` (see [Example `.env`](#environment-variables)); `chmod 600 /opt/engageai-scraper/.env`
+3. **Log file for cron:** `sudo touch /var/log/engageai-scraper.log` and `sudo chmod 644 /var/log/engageai-scraper.log`
+4. **Smoke test:** `docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_LOCK_DISABLED=1 engageai-scraper` — `SCRAPE_LOCK_DISABLED=1` avoids fighting the lock file during a manual test while cron might still be installed.
+5. **Cron:** Ensure `/etc/cron.d/engageai-scraper` exists and matches [Manual setup](#manual-setup-same-layout-as-cloud-init) (or copy from `do-app.yaml`’s `write_files` block).
+6. **Database:** Add the droplet’s **public IP** under **Managed Database → Trusted sources** if it is not already allowed.
+
+**GitHub over HTTPS:** Use a [personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token) as the password when cloning (account passwords no longer work). For organization repos with **SAML SSO**, authorize the token for that org after creating it. Alternatively use an SSH [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys/deploy-keys) on the repository.
+
 **Tuning:** If LinkedIn or DeepSeek throttles, lower `SCRAPE_MAX_WORKERS`. If the writer falls behind (queue full / workers block), raise `SCRAPE_WRITE_QUEUE_SIZE` slightly or check DB latency.
 
 ## Deploy as App Platform Job (optional)
