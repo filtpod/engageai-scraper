@@ -143,6 +143,8 @@ def main():
         "all": ("Member", "Growth Plan", "Trial", "Premium", "Starter"),
         "premium_only": ("Premium",),
         "non_premium_only": ("Member", "Growth Plan", "Trial", "Starter"),
+        "pro_premium": ("Growth Plan", "Premium"),
+        "starter_only": ("Starter",),
     }
     if group_filter not in groups_by_filter:
         print(

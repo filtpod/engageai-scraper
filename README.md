@@ -132,11 +132,12 @@ docker build -t engageai-scraper .
 
 ```cron
 CRON_TZ=UTC
-# Premium-only run 6 days/week (Mon-Sat) at 00:00 UTC
-0 0 * * 1-6 docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=premium_only engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+# Growth Plan (Pro) + Premium: twice daily at 00:00 and 12:00 UTC
+0 0 * * * docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=pro_premium engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+0 12 * * * docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=pro_premium engageai-scraper >> /var/log/engageai-scraper.log 2>&1
 
-# Full run on the 7th day (Sunday) at 00:00 UTC
-0 0 * * 0 docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=all engageai-scraper >> /var/log/engageai-scraper.log 2>&1
+# Starter: once daily at 06:00 UTC (staggered so the single scraper lock file never collides with the runs above)
+0 6 * * * docker run --rm --env-file /opt/engageai-scraper/.env -e SCRAPE_GROUP_FILTER=starter_only engageai-scraper >> /var/log/engageai-scraper.log 2>&1
 ```
 
 5. **Logs:** `tail -f /var/log/engageai-scraper.log` or your log shipper.
